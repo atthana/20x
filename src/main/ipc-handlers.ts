@@ -355,6 +355,19 @@ export function registerIpcHandlers(
     return { success: true }
   })
 
+  ipcMain.handle('agentSession:stopByTaskId', async (_, taskId: string) => {
+    const result = await agentManager.stopByTaskId(taskId)
+    return { success: true, sessionId: result.sessionId }
+  })
+
+  ipcMain.handle(
+    'agentSession:sendByTaskId',
+    async (_, taskId: string, message: string, attachments?: Array<{ id: string; filename: string; size: number; mime_type: string }>) => {
+      const result = await agentManager.sendByTaskId(taskId, message, attachments)
+      return { success: true, ...result }
+    }
+  )
+
   ipcMain.handle(
     'agentSession:send',
     async (_, sessionId: string, message: string, taskId?: string, agentId?: string, attachments?: Array<{ id: string; filename: string; size: number; mime_type: string }>) => {
@@ -378,6 +391,10 @@ export function registerIpcHandlers(
 
   ipcMain.handle('agentSession:learnFromSession', async (_, sessionId: string, message: string) => {
     return await agentManager.learnFromSession(sessionId, message)
+  })
+
+  ipcMain.handle('agentSession:getRawTranscript', async (_, taskId: string) => {
+    return await agentManager.getRawTranscriptForDebug(taskId)
   })
 
   // Agent Config handlers

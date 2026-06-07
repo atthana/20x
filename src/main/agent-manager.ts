@@ -134,6 +134,19 @@ interface PollingEntry {
   /** How many times the tillDone nudge has been sent for this polling cycle.
    *  Capped at MAX_TILLDONE_NUDGES to prevent infinite nudge loops. */
   tillDoneNudgeCount?: number
+  /** True once the stuck-session watchdog has fired for this polling cycle.
+   *  Prevents the abort message from spamming every poll tick while the
+   *  backend is still transitioning from BUSY → IDLE after the abort. */
+  watchdogFired?: boolean
+  /** Count of consecutive poll cycles containing garbled model output
+   *  (e.g. hallucinated `<｜DSML｜` tool-call markup as plain text).
+   *  Once it exceeds the threshold the session is aborted immediately
+   *  instead of waiting for the full watchdog timeout. */
+  garbledOutputCount?: number
+  /** Tracks when a tool part was first seen in "running" state (partId → timestamp).
+   *  Used by the fast stuck-tool detector to abort tools that hang without producing
+   *  data (e.g. cross-workspace file reads that OpenCode silently blocks). */
+  runningToolFirstSeen?: Map<string, number>
 }
 
 interface MessageAttachmentRef {
@@ -177,6 +190,17 @@ export class AgentManager extends EventEmitter {
   private static readonly MAX_SESSION_REDIRECTS = 200
   /** Maximum number of tillDone idle nudges per session before giving up. */
   private static readonly MAX_TILLDONE_NUDGES = 5
+
+  /** Maximum time (ms) a session can stay BUSY with no new data before we abort it.
+   *  Prevents sessions from being stuck indefinitely when a tool call hangs inside
+   *  the agent process (20x is just a spectator on the HTTP prompt call). */
+  private static readonly STUCK_SESSION_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
+
+  /** Maximum time (ms) a single tool can stay in "running" state before it's
+   *  considered stuck. This is much shorter than the session watchdog because
+   *  a single hung tool (e.g. cross-workspace file read that OpenCode silently
+   *  blocks) should be aborted quickly so the agent can recover. */
+  private static readonly STUCK_TOOL_TIMEOUT_MS = 90 * 1000 // 90 seconds
 
   // ── Event-driven nudge ──
   // When an adapter buffers new stream data it calls onDataAvailable().
@@ -1706,6 +1730,56 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
       // the secondary grace period for models with brief idle gaps.
       if (newParts.length > 0) {
         entry.lastPartReceivedAt = Date.now()
+        // Reset watchdog flag — new data means the session is alive again.
+        // If a follow-up message also gets stuck, the watchdog can re-fire.
+        entry.watchdogFired = false
+      }
+
+      // ── Garbled output detection ──
+      // Some models hallucinate tool-call markup as plain text (e.g. outputting
+      // `<｜DSML｜tool_calls>` character-by-character). This wastes tokens and
+      // never resolves. Detect the pattern and abort early instead of waiting
+      // for the full watchdog timeout (which can be 5+ minutes).
+      if (newParts.length > 0) {
+        const GARBLED_PATTERNS = ['<｜DSML｜', '<│DSML│', 'DSML｜tool_calls', 'DSML｜invoke']
+        let hasGarbled = false
+        for (const part of newParts) {
+          const text = part.content || part.text || ''
+          if (text.length > 50 && GARBLED_PATTERNS.some(p => text.includes(p))) {
+            hasGarbled = true
+            break
+          }
+        }
+        if (hasGarbled) {
+          entry.garbledOutputCount = (entry.garbledOutputCount || 0) + 1
+          // Abort after 2 consecutive detections to avoid false positives
+          if (entry.garbledOutputCount >= 2 && !entry.watchdogFired) {
+            entry.watchdogFired = true
+            console.warn(
+              `[AgentManager] Session ${sessionId}: garbled model output detected (${entry.garbledOutputCount} cycles). Aborting to prevent token waste.`
+            )
+            this.sendToRenderer('agent:output', {
+              sessionId,
+              taskId: config.taskId,
+              type: 'message',
+              data: {
+                id: `garbled-abort-${Date.now()}`,
+                role: 'system',
+                content: 'Session aborted: model is producing garbled output (hallucinated tool-call markup). You can send a new message to continue.',
+                partType: 'error'
+              }
+            })
+            try {
+              await adapter.abortPrompt(sessionId, config)
+            } catch (abortErr) {
+              console.error(`[AgentManager] Failed to abort garbled session ${sessionId}:`, abortErr)
+            }
+            return
+          }
+        } else {
+          // Reset counter when output looks normal
+          entry.garbledOutputCount = 0
+        }
       }
 
       // hasSeenWork is set exclusively in the BUSY / WAITING_APPROVAL status
@@ -1886,6 +1960,136 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
           // Agent resumed work (possibly after a tillDone nudge) — reset the
           // nudge counter so the next idle cycle gets a fresh allowance.
           if (peBusy.tillDoneNudgeCount) peBusy.tillDoneNudgeCount = 0
+
+          // ── Fast stuck-tool detector ──
+          // Some tools (notably `read` on cross-workspace files) silently hang
+          // without producing any output or asking for permission. The general
+          // watchdog below waits 5 minutes, which is far too long for a single
+          // tool. Here we check for tools stuck in "running" state for >90s.
+          if (!peBusy.watchdogFired && 'getRunningTools' in adapter && typeof adapter.getRunningTools === 'function') {
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const getRunningToolsFn = (adapter as any).getRunningTools.bind(adapter)
+              const runningTools: Array<{ partId: string; toolName: string; startTime?: number; input?: Record<string, unknown> }> = await getRunningToolsFn(sessionId, config)
+              const now = Date.now()
+              for (const tool of runningTools) {
+                if (!tool.startTime) continue
+                const elapsed = now - tool.startTime
+                if (elapsed > AgentManager.STUCK_TOOL_TIMEOUT_MS) {
+                  // Build a descriptive reason
+                  let reason = `Tool "${tool.toolName}" has been running for ${Math.round(elapsed / 1000)}s with no output`
+                  const filePath = tool.input?.filePath as string | undefined
+                  if (filePath && config.workspaceDir && !filePath.startsWith(config.workspaceDir)) {
+                    reason = `Tool "${tool.toolName}" stuck trying to access file outside workspace: ${filePath}`
+                  }
+
+                  peBusy.watchdogFired = true
+                  console.warn(`[AgentManager] Session ${sessionId}: ${reason}. Aborting.`)
+
+                  this.sendToRenderer('agent:output', {
+                    sessionId,
+                    taskId: config.taskId,
+                    type: 'message',
+                    data: {
+                      id: `stuck-tool-${Date.now()}`,
+                      role: 'system',
+                      content: `Session auto-aborted: ${reason}. You can send a new message to continue.`,
+                      partType: 'error'
+                    }
+                  })
+                  try {
+                    await adapter.abortPrompt(sessionId, config)
+                  } catch (abortErr) {
+                    console.error(`[AgentManager] Failed to abort stuck-tool session ${sessionId}:`, abortErr)
+                  }
+                  return
+                }
+              }
+            } catch {
+              // Non-fatal — fall through to the general watchdog
+            }
+          }
+
+          // ── Stuck session watchdog ──
+          // If the session has been BUSY but hasn't received any new data for
+          // STUCK_SESSION_TIMEOUT_MS, a tool call is likely hung inside the agent
+          // process. Abort the prompt so the session can recover instead of
+          // staying stuck indefinitely.
+          //
+          // Exception: if the last polled message is a `question` tool in running
+          // state, the session is waiting for user input — not stuck. This can
+          // happen when the OpenCode question.list() check fails silently and
+          // getStatus() reports BUSY instead of WAITING_APPROVAL.
+          const lastDataAt = peBusy.lastPartReceivedAt || peBusy.createdAt
+          const silentDuration = Date.now() - lastDataAt
+          if (silentDuration > AgentManager.STUCK_SESSION_TIMEOUT_MS && !peBusy.watchdogFired) {
+            // Check if the session is actually waiting for user input.
+            // This can happen when OpenCode's question.list() check fails silently
+            // and getStatus() reports BUSY instead of WAITING_APPROVAL, even though
+            // the agent is just waiting for the user to answer a question.
+            //
+            // We check three signals:
+            // 1. Session was in waiting_approval from a previous poll cycle
+            // 2. Current batch has a question/permission tool
+            // 3. Adapter has pending permissions (SSE-based)
+            let isWaitingForInput = false
+
+            // Signal 1: session was previously in waiting_approval
+            if (session.status === 'waiting_approval') {
+              isWaitingForInput = true
+            }
+
+            // Signal 2: current batch has question/permission tool
+            if (!isWaitingForInput) {
+              for (const msg of batchMessages) {
+                const tool = msg.tool as { name?: string; questions?: unknown[] } | undefined
+                if (tool?.name === 'question' || tool?.name === 'permission') {
+                  isWaitingForInput = true
+                  break
+                }
+              }
+            }
+
+            // Signal 3: adapter has pending permissions from SSE events
+            if (!isWaitingForInput && 'getPendingApproval' in adapter && typeof adapter.getPendingApproval === 'function') {
+              const pending = (adapter as unknown as { getPendingApproval: (sid: string) => unknown }).getPendingApproval(sessionId)
+              if (pending) isWaitingForInput = true
+            }
+
+            if (isWaitingForInput) {
+              console.log(
+                `[AgentManager] Session ${sessionId} BUSY for ${Math.round(silentDuration / 1000)}s but has pending user input — not aborting`
+              )
+            } else {
+              // Mark the watchdog as fired BEFORE sending the message/abort.
+              // This prevents the abort notification from spamming every poll
+              // tick while the backend transitions from BUSY → IDLE.
+              peBusy.watchdogFired = true
+              console.warn(
+                `[AgentManager] Session ${sessionId} stuck: BUSY for ${Math.round(silentDuration / 1000)}s with no new data. Aborting prompt.`
+              )
+              // Notify the user that the session was auto-aborted
+              this.sendToRenderer('agent:output', {
+                sessionId,
+                taskId: config.taskId,
+                type: 'message',
+                data: {
+                  id: `stuck-abort-${Date.now()}`,
+                  role: 'system',
+                  content: `Session auto-aborted: no activity for ${Math.round(silentDuration / 1000)}s. A tool call may have hung. You can send a new message to continue.`,
+                  partType: 'error'
+                }
+              })
+              // Abort the prompt — this will cause executePromptWithRetry to exit,
+              // and the next poll cycle will detect IDLE status.
+              try {
+                await adapter.abortPrompt(sessionId, config)
+              } catch (abortErr) {
+                console.error(`[AgentManager] Failed to abort stuck session ${sessionId}:`, abortErr)
+              }
+              return
+            }
+          }
         }
         if (session.status !== 'working') {
           session.status = 'working'
@@ -2147,7 +2351,7 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
     // on a follow-up message the streaming replay (with yet another set of
     // stableId-based IDs) was not deduped by either — causing every
     // historical message to appear twice.
-    const batchMessages: Array<{ id: string; role: string; content: string; partType?: string; tool?: unknown; taskProgress?: unknown }> = []
+    const batchMessages: Array<{ id: string; role: string; content: string; partType?: string; tool?: unknown; taskProgress?: unknown; receivedAt?: number }> = []
     const resumedSeenMessageIds = new Set<string>()
     const resumedSeenPartIds = new Set<string>()
     const resumedPartContentLengths = new Map<string, string>()
@@ -2170,7 +2374,8 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
             content: part.content || part.text || '',
             partType: part.type,
             tool: part.tool,
-            taskProgress: part.taskProgress
+            taskProgress: part.taskProgress,
+            receivedAt: part.receivedAt
           })
         }
       }
@@ -2439,6 +2644,62 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
   }
 
   /**
+   * Get raw transcript for debugging. Returns all message parts with full tool
+   * input/output, thinking blocks, errors, etc. Used by the renderer's hidden
+   * "Copy Debug Info" feature to include raw coding agent data.
+   * Truncates individual fields to keep the payload manageable.
+   */
+  async getRawTranscriptForDebug(taskId: string): Promise<Array<{ role: string; parts: Array<{ type: string; content?: string; tool?: { name: string; status?: string; input?: string; output?: string; error?: string } }> }>> {
+    let session: AgentSession | undefined
+    for (const s of this.sessions.values()) {
+      if (s.taskId === taskId) {
+        session = s
+        break
+      }
+    }
+
+    if (!session?.adapter?.getAllMessages) {
+      return []
+    }
+
+    const MAX_FIELD = 3000
+    const truncField = (val: unknown): string | undefined => {
+      if (val == null) return undefined
+      const s = typeof val === 'string' ? val : JSON.stringify(val)
+      return s.length > MAX_FIELD ? s.slice(0, MAX_FIELD) + `… (${s.length - MAX_FIELD} more)` : s
+    }
+
+    try {
+      const config: SessionConfig = {
+        agentId: session.agentId,
+        taskId: session.taskId,
+        workspaceDir: session.workspaceDir || this.db.getWorkspaceDir(taskId)
+      }
+      const messages = await session.adapter.getAllMessages(session.id, config)
+      return messages
+        .filter(m => m.parts && m.parts.length > 0)
+        .slice(-100) // Last 100 messages only
+        .map(m => ({
+          role: m.role,
+          parts: m.parts.map(p => ({
+            type: p.type,
+            content: truncField(p.content || p.text),
+            tool: p.tool ? {
+              name: p.tool.name,
+              status: p.tool.status,
+              input: truncField(p.tool.input),
+              output: truncField(p.tool.output),
+              error: p.tool.error
+            } : undefined
+          }))
+        }))
+    } catch (err) {
+      console.error(`[AgentManager] Failed to get raw transcript for task ${taskId}:`, err)
+      return []
+    }
+  }
+
+  /**
    * Get a summary transcript for a task's session.
    * Returns assistant text messages suitable for sibling subtask coordination.
    * Used by the task-api-server to serve transcript data to subtask MCP agents.
@@ -2515,7 +2776,7 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
         workspaceDir: session.workspaceDir || this.db.getWorkspaceDir(session.taskId)
       }
       const messages = await session.adapter.getAllMessages(sessionId, config)
-      const batchMessages: Array<{ id: string; role: string; content: string; partType?: string; tool?: unknown; taskProgress?: unknown }> = []
+      const batchMessages: Array<{ id: string; role: string; content: string; partType?: string; tool?: unknown; taskProgress?: unknown; receivedAt?: number }> = []
 
       for (const message of messages) {
         if (message.role === MessageRole.USER) continue
@@ -2530,7 +2791,10 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
 
           session.seenPartIds.add(partId)
           if (part.content || part.text) {
-            session.partContentLengths.set(partId, String((part.content || part.text || '').length))
+            // Store actual text content, NOT length — partContentLengths is used
+            // for chunk accumulation in streaming; storing a length string causes
+            // the number to be prepended to the next streamed chunk.
+            session.partContentLengths.set(partId, part.content || part.text || '')
           }
 
           batchMessages.push({
@@ -2539,7 +2803,8 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
             content: part.content || part.text || '',
             partType,
             tool: part.tool,
-            taskProgress: part.taskProgress
+            taskProgress: part.taskProgress,
+            receivedAt: part.receivedAt
           })
         }
       }
@@ -2852,6 +3117,45 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
     })
   }
 
+  /**
+   * Stops a session by taskId — used when the renderer's session mapping
+   * is broken (Session: none) and the normal stop-by-sessionId path fails.
+   */
+  async stopByTaskId(taskId: string): Promise<{ sessionId: string | null }> {
+    const found = this.findSessionByTaskId(taskId)
+    if (!found) {
+      console.log(`[AgentManager] stopByTaskId: no active session found for task ${taskId}`)
+      return { sessionId: null }
+    }
+    console.log(`[AgentManager] stopByTaskId: found session ${found.sessionId} for task ${taskId}, stopping`)
+    await this.stopSession(found.sessionId)
+    return { sessionId: found.sessionId }
+  }
+
+  /**
+   * Sends a message by taskId — used when the renderer's session mapping
+   * is broken and the normal send-by-sessionId path can't resolve a sessionId.
+   * Tries to find a live in-memory session first, then falls back to
+   * sendMessage's built-in resume/create logic.
+   */
+  async sendByTaskId(
+    taskId: string,
+    message: string,
+    attachments?: MessageAttachmentRef[]
+  ): Promise<{ sessionId: string | null; newSessionId?: string }> {
+    const found = this.findSessionByTaskId(taskId)
+    if (found) {
+      console.log(`[AgentManager] sendByTaskId: found live session ${found.sessionId} for task ${taskId}`)
+      const result = await this.sendMessage(found.sessionId, message, taskId, found.session.agentId, attachments)
+      return { sessionId: found.sessionId, ...result }
+    }
+    // No live session — delegate to sendMessage with empty sessionId.
+    // Its internal logic will try resume from persisted session_id, or create a new one.
+    console.log(`[AgentManager] sendByTaskId: no live session for task ${taskId}, delegating to sendMessage for recovery`)
+    const result = await this.sendMessage('', message, taskId, undefined, attachments)
+    return { sessionId: null, ...result }
+  }
+
   async sendMessage(
     sessionId: string,
     message: string,
@@ -3066,7 +3370,20 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
         selectedOption = answerMap[message] || (approved ? 'approved' : 'abort')
       }
       console.log(`[AgentManager] Responding to ACP adapter approval with: ${selectedOption}`)
-      await (adapter as unknown as AcpAdapter).respondToApproval(sessionId, approved, selectedOption)
+      // OpenCode adapter returns boolean (true=handled, false=no permission found).
+      // AcpAdapter returns void. Cast to boolean|void to handle both.
+      const handled = await (adapter as unknown as { respondToApproval: (sid: string, approved: boolean, opt?: string) => Promise<boolean | void> }).respondToApproval(sessionId, approved, selectedOption)
+
+      // If no pending permission was found (stale prompt after watchdog abort
+      // or app restart), send a continuation message so the session recovers.
+      // AcpAdapter returns void (undefined), which won't match === false.
+      if (handled === false && approved) {
+        console.log(`[AgentManager] No pending permission found for ${sessionId}, sending continuation message to recover session`)
+        this.doSendAdapterMessage(session, sessionId, 'continue').catch((err) => {
+          console.error(`[AgentManager] Continuation message failed for session ${sessionId}:`, err)
+          this.handleSessionError(sessionId, session!, err)
+        })
+      }
       return
     }
 
@@ -3201,7 +3518,7 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
     })
 
     // Collect all message parts into a single batch (matching resumeAdapterSession pattern)
-    const batchMessages: Array<{ id: string; role: string; content: string; partType?: string; tool?: unknown; update?: boolean; taskProgress?: unknown }> = []
+    const batchMessages: Array<{ id: string; role: string; content: string; partType?: string; tool?: unknown; update?: boolean; taskProgress?: unknown; receivedAt?: number }> = []
     for (const msg of messages) {
       for (const part of msg.parts) {
         batchMessages.push({
@@ -3220,6 +3537,7 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
             todos: part.tool.todos
           } : undefined,
           taskProgress: part.taskProgress,
+          receivedAt: part.receivedAt,
           // Pass update flag so mobile store merges tool results into their
           // pending tool_use entries (e.g. status pending → success)
           ...(part.update ? { update: true } : {})

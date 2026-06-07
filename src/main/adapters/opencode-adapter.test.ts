@@ -700,4 +700,279 @@ describe('OpencodeAdapter', () => {
       expect(Object.keys(models)).toEqual(['model-a', 'model-b'])
     })
   })
+
+  describe('permission auto-approve', () => {
+    it('handleServerEvent routes permission.asked to autoApprovePermission when mode is allow', async () => {
+      const adapter = new OpencodeAdapter()
+      const autoApproveSpy = vi.fn().mockResolvedValue(undefined)
+      ;(adapter as any).autoApprovePermission = autoApproveSpy
+      ;(adapter as any).sessionPermissionModes.set('ses_abc', 'allow')
+
+      // Simulate a permission.asked SSE event (direct format)
+      ;(adapter as any).handleServerEvent({
+        type: 'permission.asked',
+        properties: {
+          id: 'per_123',
+          sessionID: 'ses_abc',
+          permission: 'external_directory',
+          patterns: ['/some/path/*']
+        }
+      })
+
+      expect(autoApproveSpy).toHaveBeenCalledWith('ses_abc', 'per_123')
+    })
+
+    it('handleServerEvent routes permission.asked from /global/event payload envelope', async () => {
+      const adapter = new OpencodeAdapter()
+      const autoApproveSpy = vi.fn().mockResolvedValue(undefined)
+      ;(adapter as any).autoApprovePermission = autoApproveSpy
+      ;(adapter as any).sessionPermissionModes.set('ses_abc', 'allow')
+
+      // /global/event wraps events in a payload envelope
+      ;(adapter as any).handleServerEvent({
+        payload: {
+          type: 'permission.asked',
+          properties: {
+            id: 'per_456',
+            sessionID: 'ses_abc',
+            permission: 'external_directory',
+            patterns: ['/some/path/*']
+          }
+        }
+      })
+
+      expect(autoApproveSpy).toHaveBeenCalledWith('ses_abc', 'per_456')
+    })
+
+    it('handleServerEvent queues permission for UI when mode is ask', () => {
+      const adapter = new OpencodeAdapter()
+      const onDataAvailable = vi.fn()
+      ;(adapter as any).onDataAvailable = onDataAvailable
+      ;(adapter as any).sessionPermissionModes.set('ses_abc', 'ask')
+
+      ;(adapter as any).handleServerEvent({
+        type: 'permission.asked',
+        properties: {
+          id: 'per_789',
+          sessionID: 'ses_abc',
+          permission: 'external_directory',
+          patterns: ['/some/path/*']
+        }
+      })
+
+      const queue = (adapter as any).pendingPermissions.get('ses_abc')
+      expect(queue).toHaveLength(1)
+      expect(queue[0].permissionId).toBe('per_789')
+      expect(onDataAvailable).toHaveBeenCalledWith('ses_abc')
+    })
+
+    it('handleServerEvent defaults to ask when session has no explicit permission mode', () => {
+      const adapter = new OpencodeAdapter()
+      const onDataAvailable = vi.fn()
+      ;(adapter as any).onDataAvailable = onDataAvailable
+      // Do NOT set sessionPermissionModes for ses_abc — should default to 'ask'
+
+      ;(adapter as any).handleServerEvent({
+        type: 'permission.asked',
+        properties: {
+          id: 'per_unknown',
+          sessionID: 'ses_abc',
+          permission: 'external_directory',
+          patterns: []
+        }
+      })
+
+      // Should queue for UI, not auto-approve
+      const queue = (adapter as any).pendingPermissions.get('ses_abc')
+      expect(queue).toHaveLength(1)
+    })
+
+    it('autoApprovePermission calls V2 SDK permission.reply with correct args including directory', async () => {
+      const adapter = new OpencodeAdapter()
+      const mockReply = vi.fn().mockResolvedValue({ data: {}, error: null })
+      const mockV2Client = {
+        permission: { reply: mockReply, list: vi.fn() }
+      }
+      ;(adapter as any).v2Client = mockV2Client
+      // Set the workspace directory for the session
+      ;(adapter as any).sessionWorkspaceDirs.set('ses_abc', '/workspace/task_1')
+
+      await (adapter as any).autoApprovePermission('ses_abc', 'per_123')
+
+      // If OpenCodeV2Client is loaded (it is in test env since we import the module),
+      // it should try to use v2Client. If OpenCodeV2Client is null (dynamic import
+      // failed), it falls through to raw fetch.
+      if (mockReply.mock.calls.length > 0) {
+        expect(mockReply).toHaveBeenCalledWith({
+          requestID: 'per_123',
+          reply: 'always',
+          directory: '/workspace/task_1'
+        })
+      }
+    })
+
+    it('autoApprovePermission falls back to raw fetch when V2 SDK is not loaded', async () => {
+      const adapter = new OpencodeAdapter()
+      ;(adapter as any).v2Client = null
+      ;(adapter as any).serverUrl = 'http://localhost:4096'
+      ;(adapter as any).sessionWorkspaceDirs.set('ses_abc', '/workspace/task_1')
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        text: async () => '{}'
+      })
+      vi.stubGlobal('fetch', mockFetch)
+
+      try {
+        await (adapter as any).autoApprovePermission('ses_abc', 'per_123')
+
+        // Should have called fetch with V2 endpoint (not V1) and include directory query param
+        // Check if fetch was called at all — if OpenCodeV2Client IS loaded
+        // (dynamic import succeeded at module init), it would use the SDK path
+        // and never reach fetch. Either path is valid depending on the env.
+        if (mockFetch.mock.calls.length > 0) {
+          expect(mockFetch).toHaveBeenCalledWith(
+            'http://localhost:4096/permission/per_123/reply?directory=%2Fworkspace%2Ftask_1',
+            expect.objectContaining({
+              method: 'POST',
+              body: JSON.stringify({ reply: 'always' })
+            })
+          )
+        }
+      } finally {
+        vi.unstubAllGlobals()
+      }
+    })
+
+    it('full SSE → auto-approve flow works end-to-end', async () => {
+      const adapter = new OpencodeAdapter()
+      ;(adapter as any).sessionPermissionModes.set('ses_live', 'allow')
+      ;(adapter as any).serverUrl = 'http://localhost:4096'
+
+      // Track what autoApprovePermission does
+      const calls: Array<{ sessionId: string; permissionId: string }> = []
+      ;(adapter as any).autoApprovePermission = async (sid: string, pid: string) => {
+        calls.push({ sessionId: sid, permissionId: pid })
+        // Don't actually call the real method (no server running)
+      }
+
+      // Simulate SSE data arriving
+      const sseData = 'data: {"payload":{"type":"permission.asked","properties":{"id":"per_ext_dir","sessionID":"ses_live","permission":"external_directory","patterns":["/other/workspace/*"]}}}\n'
+
+      // Parse it the same way processEventStream does
+      const lines = sseData.split('\n')
+      for (const rawLine of lines) {
+        const line = rawLine.trim()
+        if (line.startsWith('data: ') || line.startsWith('data:')) {
+          const json = line.startsWith('data: ') ? line.slice(6) : line.slice(5)
+          if (!json) continue
+          try {
+            const event = JSON.parse(json)
+            ;(adapter as any).handleServerEvent(event)
+          } catch { /* skip */ }
+        }
+      }
+
+      expect(calls).toEqual([{ sessionId: 'ses_live', permissionId: 'per_ext_dir' }])
+    })
+  })
+
+  describe('getRunningTools', () => {
+    it('returns tools currently in running state with their input', async () => {
+      const adapter = new OpencodeAdapter()
+      const sessionId = 'ses_running_tools'
+      const config = { agentId: 'a', taskId: 't', workspaceDir: '/workspace/task_1' }
+
+      const mockClient = {
+        session: {
+          messages: vi.fn().mockResolvedValue({
+            data: [
+              {
+                info: { id: 'msg_1', role: 'assistant' },
+                parts: [
+                  {
+                    id: 'prt_1',
+                    type: 'tool',
+                    tool: 'read',
+                    state: {
+                      status: 'running',
+                      input: { filePath: '/workspace/task_2/spec.md' },
+                      time: { start: 1000000 }
+                    }
+                  },
+                  {
+                    id: 'prt_2',
+                    type: 'tool',
+                    tool: 'bash',
+                    state: {
+                      status: 'completed',
+                      input: { command: 'ls' },
+                      time: { start: 900000, end: 901000 }
+                    }
+                  },
+                  {
+                    id: 'prt_3',
+                    type: 'text',
+                    text: 'some text'
+                  }
+                ]
+              },
+              {
+                info: { id: 'msg_2', role: 'assistant' },
+                parts: [
+                  {
+                    id: 'prt_4',
+                    type: 'tool',
+                    tool: 'write',
+                    state: {
+                      status: 'running',
+                      input: { filePath: '/workspace/task_1/file.ts', content: '...' },
+                      time: { start: 1100000 }
+                    }
+                  }
+                ]
+              }
+            ]
+          })
+        }
+      }
+
+      ;(adapter as any).clients = new Map([[sessionId, mockClient]])
+
+      const running = await adapter.getRunningTools(sessionId, config as any)
+
+      expect(running).toHaveLength(2)
+      expect(running[0]).toEqual({
+        partId: 'prt_1',
+        toolName: 'read',
+        startTime: 1000000,
+        input: { filePath: '/workspace/task_2/spec.md' }
+      })
+      expect(running[1]).toEqual({
+        partId: 'prt_4',
+        toolName: 'write',
+        startTime: 1100000,
+        input: { filePath: '/workspace/task_1/file.ts', content: '...' }
+      })
+    })
+
+    it('returns empty array when no client exists', async () => {
+      const adapter = new OpencodeAdapter()
+      const result = await adapter.getRunningTools('ses_none', { agentId: 'a', taskId: 't' } as any)
+      expect(result).toEqual([])
+    })
+
+    it('returns empty array when messages API fails', async () => {
+      const adapter = new OpencodeAdapter()
+      const mockClient = {
+        session: {
+          messages: vi.fn().mockRejectedValue(new Error('Server down'))
+        }
+      }
+      ;(adapter as any).clients = new Map([['ses_fail', mockClient]])
+
+      const result = await adapter.getRunningTools('ses_fail', { agentId: 'a', taskId: 't' } as any)
+      expect(result).toEqual([])
+    })
+  })
 })

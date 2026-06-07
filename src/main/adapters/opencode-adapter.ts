@@ -8,6 +8,7 @@ import { ENTERPRISE_AI_GATEWAY_PROVIDER_ID, readEnterpriseAiGatewayConfig } from
 import type { DatabaseManager } from '../database'
 import type {
   CodingAgentAdapter,
+  McpServerConfig,
   SessionConfig,
   SessionStatus,
   SessionMessage,
@@ -25,7 +26,9 @@ type V2QuestionRequest = import('@opencode-ai/sdk/v2/client').QuestionRequest
 let OpenCodeV2: OpenCodeV2Module | null = null
 let OpenCodeV2Client: V2ClientModule | null = null
 
-// Custom fetch with no timeout — agent prompts can run indefinitely
+// Custom fetch with no timeout — used ONLY for session.prompt() which stays open
+// for the entire agent loop (including all tool calls). All other SDK calls use the
+// default fetch which has the SDK's built-in 60s timeout.
 const noTimeoutAgent = new UndiciAgent({ headersTimeout: 0, bodyTimeout: 0 })
 const noTimeoutFetch = (req: unknown) => (globalThis as unknown as Record<string, (...args: unknown[]) => unknown>).fetch(req, { dispatcher: noTimeoutAgent })
 
@@ -50,7 +53,9 @@ export class OpencodeAdapter implements CodingAgentAdapter {
   private sharedClient: V2OpencodeClient | null = null
   /** A separate V2 client with a reasonable timeout for quick operations (config, providers, health) */
   private quickClient: V2OpencodeClient | null = null
-  private clients: Map<string, OpencodeClient> = new Map() // sessionId -> ocClient
+  private clients: Map<string, OpencodeClient> = new Map() // sessionId -> ocClient (default timeout, for polling/status/create)
+  /** Separate clients with no timeout, used ONLY for session.prompt() which runs indefinitely */
+  private promptClients: Map<string, OpencodeClient> = new Map()
   private v2Client: V2OpencodeClient | null = null
   private promptAborts: Map<string, AbortController> = new Map()
   /** Provider errors captured from prompt results (surfaced via getStatus) */
@@ -77,6 +82,12 @@ export class OpencodeAdapter implements CodingAgentAdapter {
   private sseAbort: AbortController | null = null
   /** Per-session permission mode ('ask' = surface in UI, 'allow' = auto-approve) */
   private sessionPermissionModes: Map<string, 'ask' | 'allow'> = new Map()
+  /** Per-session workspace directory — needed for permission replies and other
+   *  session-scoped V2 API calls initiated from global SSE events. */
+  private sessionWorkspaceDirs: Map<string, string> = new Map()
+  /** Per-session MCP server configs — retained for re-registration on session resume
+   *  (e.g. after 20x restart when stdio MCP server processes are dead). */
+  private sessionMcpConfigs: Map<string, Record<string, { type: string; url?: string; headers?: Record<string, string>; command?: string; args?: string[]; env?: Record<string, string> }>> = new Map()
 
   constructor(private db?: Pick<DatabaseManager, 'getSetting'>) {
     this.sdkLoading = this.loadSDK()
@@ -228,6 +239,87 @@ export class OpencodeAdapter implements CodingAgentAdapter {
     return undefined
   }
 
+  /**
+   * Register MCP servers with the OpenCode backend (mcp.add + mcp.connect).
+   * Called from both createSession (initial setup) and resumeSession (after 20x
+   * restart when stdio MCP server processes are dead and need re-registration).
+   */
+  private async registerMcpServers(
+    ocClient: OpencodeClient,
+    mcpServers: Record<string, McpServerConfig>,
+    workspaceDir?: string
+  ): Promise<void> {
+    const connectCandidates: string[] = []
+
+    for (const [name, mcpConfig] of Object.entries(mcpServers)) {
+      try {
+        const mcpAddConfig = mcpConfig.type === 'http'
+          ? { type: 'remote' as const, url: mcpConfig.url ?? '', headers: mcpConfig.headers }
+          : { type: 'local' as const, command: [mcpConfig.command ?? '', ...(mcpConfig.args ?? [])], environment: mcpConfig.env }
+        console.log(`[OpencodeAdapter] Registering MCP server: ${name}`, JSON.stringify(mcpAddConfig))
+
+        // Add MCP server
+        const addResult = await ocClient.mcp.add({
+          body: { name, config: mcpAddConfig },
+          ...(workspaceDir && { query: { directory: workspaceDir } })
+        })
+
+        if (addResult.error) {
+          console.error(`[OpencodeAdapter] mcp.add error for ${name}:`, addResult.error)
+          continue
+        }
+
+        // Check the add response for immediate server status
+        const addStatus = addResult.data?.[name] as { status: string; error?: string } | undefined
+        if (addStatus) {
+          console.log(`[OpencodeAdapter] mcp.add status for '${name}': ${addStatus.status}${addStatus.error ? ` - ${addStatus.error}` : ''}`)
+          if (addStatus.status === 'failed') {
+            console.error(`[OpencodeAdapter] MCP server '${name}' failed immediately after add: ${addStatus.error}`)
+            continue
+          }
+          if (addStatus.status === 'connected') {
+            console.log(`[OpencodeAdapter] Successfully registered MCP server: ${name} (connected via mcp.add)`)
+            continue
+          }
+        }
+
+        // Connect to MCP server
+        const connectResult = await ocClient.mcp.connect({
+          path: { name },
+          ...(workspaceDir && { query: { directory: workspaceDir } })
+        })
+
+        if (connectResult.error) {
+          console.error(`[OpencodeAdapter] mcp.connect error for ${name}:`, connectResult.error)
+          continue
+        }
+
+        // Check connect result (returns boolean)
+        if (connectResult.data === false) {
+          console.error(`[OpencodeAdapter] mcp.connect returned false for ${name} — server failed to connect`)
+          continue
+        }
+        connectCandidates.push(name)
+      } catch (mcpError) {
+        console.error(`[OpencodeAdapter] Failed to register MCP server ${name}:`, mcpError)
+      }
+    }
+
+    if (connectCandidates.length > 0) {
+      const readiness = await this.waitForMcpServersReady(ocClient, connectCandidates, workspaceDir)
+      for (const name of connectCandidates) {
+        const state = readiness.get(name)
+        if (state === 'connected') {
+          console.log(`[OpencodeAdapter] Successfully registered MCP server: ${name}`)
+        } else if (state === 'failed') {
+          console.error(`[OpencodeAdapter] MCP server '${name}' failed to connect`)
+        } else {
+          console.error(`[OpencodeAdapter] MCP server '${name}' did not reach connected status — tools may not work`)
+        }
+      }
+    }
+  }
+
   private getScopedPartId(messageId: string, rawPartId: string | undefined, fallbackIndex?: number): string | undefined {
     if (rawPartId) return `${messageId}:${rawPartId}`
     if (fallbackIndex !== undefined) return `${messageId}:part-${fallbackIndex}`
@@ -259,18 +351,15 @@ export class OpencodeAdapter implements CodingAgentAdapter {
    * Push the merged provider/auth config to the running OpenCode server.
    *
    * ⚠️  PATCH /global/config causes the server to call disposeAllInstancesAndEmitGlobalDisposed(),
-   * which aborts every running session processor.  This must ONLY be called:
-   *   1. Once on first server connection (ensureServerRunning)
-   *   2. Explicitly via notifyConfigChanged() when the user edits settings or a key rotates
-   *   3. From getProvidersInner() which is a user-initiated settings UI query
+   * which aborts every running session processor AND disconnects all MCP servers.
    *
-   * NEVER call this in hot paths like getClient() or createSession().
+   * Strategy:
+   *   - When sessions are active: push via directory-scoped PATCH /config for each
+   *     active session directory. This updates the config without killing MCP connections.
+   *   - When no sessions are active: safe to use global endpoint.
    */
   private async pushMergedConfigToClient(client: V2OpencodeClient): Promise<void> {
     const hasActivePrompts = this.promptAborts.size > 0
-    if (hasActivePrompts) {
-      console.warn(`[OpencodeAdapter] pushMergedConfigToClient: ${this.promptAborts.size} prompt(s) in flight — config push may abort them`)
-    }
 
     try {
       const mergedConfig = buildMergedOpencodeConfig(undefined, this.db)
@@ -283,17 +372,38 @@ export class OpencodeAdapter implements CodingAgentAdapter {
       console.log('[OpencodeAdapter] pushMergedConfigToClient: pushing providers:', providerIds.join(', '))
 
       const castConfig = mergedConfig as import('@opencode-ai/sdk/v2/client').Config
-      try {
-        const result = await client.global.config.update({ config: castConfig })
-        if (result.error) {
-          console.warn('[OpencodeAdapter] global.config.update returned error:', JSON.stringify(result.error))
-          // Fall through to try directory-scoped endpoint
-          throw new Error('global.config.update returned error')
+
+      if (hasActivePrompts) {
+        // Sessions are running — use directory-scoped config updates to avoid
+        // disposeAllInstances which would kill MCP connections.
+        console.log(`[OpencodeAdapter] pushMergedConfigToClient: ${this.promptAborts.size} prompt(s) active — using directory-scoped config push`)
+        const directories = new Set(this.sessionWorkspaceDirs.values())
+        if (directories.size > 0) {
+          for (const dir of directories) {
+            try {
+              await client.config.update({ config: castConfig, directory: dir })
+            } catch {
+              // Individual directory push failed — non-fatal
+            }
+          }
+        } else {
+          // No directories known — fall back to global as last resort
+          console.warn('[OpencodeAdapter] pushMergedConfigToClient: no known directories, using global endpoint (may disrupt active sessions)')
+          await client.global.config.update({ config: castConfig })
         }
-      } catch {
-        const result = await client.config.update({ config: castConfig })
-        if (result.error) {
-          console.warn('[OpencodeAdapter] config.update returned error:', JSON.stringify(result.error))
+      } else {
+        // No active sessions — safe to use global endpoint
+        try {
+          const result = await client.global.config.update({ config: castConfig })
+          if (result.error) {
+            console.warn('[OpencodeAdapter] global.config.update returned error:', JSON.stringify(result.error))
+            throw new Error('global.config.update returned error')
+          }
+        } catch {
+          const result = await client.config.update({ config: castConfig })
+          if (result.error) {
+            console.warn('[OpencodeAdapter] config.update returned error:', JSON.stringify(result.error))
+          }
         }
       }
       this.configPushed = true
@@ -572,6 +682,16 @@ export class OpencodeAdapter implements CodingAgentAdapter {
     // Ensure common binary install paths are in PATH so the SDK can find `opencode`
     this.ensureBinaryPaths()
 
+    // Set bash tool timeout if not already configured.
+    // Without this, bash commands inside the agent run indefinitely — a single
+    // hung `npm install` or `git clone` will keep the session stuck forever.
+    // 10 minutes is generous enough for legitimate long-running commands while
+    // preventing truly stuck processes.
+    if (!process.env.OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS) {
+      process.env.OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS = '600000' // 10 minutes
+      console.log('[OpencodeAdapter] Set OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS=600000 (10min)')
+    }
+
     const isDefaultUrl = targetUrl === DEFAULT_SERVER_URL || targetUrl === 'http://127.0.0.1:4096'
 
     this.serverStarting = (async () => {
@@ -582,8 +702,7 @@ export class OpencodeAdapter implements CodingAgentAdapter {
           this.serverInstance = null
           // Create a V2 client for the existing server (has global.health())
           this.sharedClient = OpenCodeV2Client!.createOpencodeClient({
-            baseUrl: accessibleUrl,
-            fetch: noTimeoutFetch as unknown as typeof fetch
+            baseUrl: accessibleUrl
           })
           // Create a separate client with bounded timeout for quick operations
           this.quickClient = OpenCodeV2Client!.createOpencodeClient({
@@ -668,17 +787,20 @@ export class OpencodeAdapter implements CodingAgentAdapter {
     // calls that aborted all running sessions when parallel tasks started.
 
     const baseUrl = this.serverUrl || config.serverUrl || DEFAULT_SERVER_URL
-    const ocClient = OpenCodeSDK!.createOpencodeClient({ baseUrl, fetch: noTimeoutFetch as unknown as (request: Request) => ReturnType<typeof fetch> })
+    // Default client uses SDK's built-in timeout (60s) for session create, polling, MCP ops, etc.
+    const ocClient = OpenCodeSDK!.createOpencodeClient({ baseUrl })
+    // Separate client with no timeout — used ONLY for session.prompt() which runs indefinitely
+    const promptClient = OpenCodeSDK!.createOpencodeClient({ baseUrl, fetch: noTimeoutFetch as unknown as (request: Request) => ReturnType<typeof fetch> })
 
-    // Register runtime plugins via config.update() so the running server loads them.
-    // Plugins are registered globally (no directory scope) because the OpenCode server
-    // resolves session directories to the actual git repo root, which differs from the
-    // workspace directory where plugin files are written. Each plugin uses absolute paths
-    // for its state/config files so different workspaces don't conflict.
+    // Register runtime plugins via directory-scoped config.update().
+    // Using the directory scope avoids side-effects on other sessions — unscoped
+    // config patches can trigger disposeAllInstances on the OpenCode server,
+    // which kills MCP connections for every running session.
     if (this.pluginFilePaths.length > 0) {
       try {
         await ocClient.config.update({
-          body: { plugin: [...this.pluginFilePaths] } as Record<string, unknown>
+          body: { plugin: [...this.pluginFilePaths] } as Record<string, unknown>,
+          ...(config.workspaceDir && { query: { directory: config.workspaceDir } })
         })
         console.log('[OpencodeAdapter] Registered runtime plugins via config.update:', this.pluginFilePaths)
       } catch (err) {
@@ -688,75 +810,7 @@ export class OpencodeAdapter implements CodingAgentAdapter {
 
     // Register MCP servers BEFORE creating session so the session picks them up
     if (config.mcpServers) {
-      const connectCandidates: string[] = []
-
-      for (const [name, mcpConfig] of Object.entries(config.mcpServers)) {
-        try {
-          const mcpAddConfig = mcpConfig.type === 'http'
-            ? { type: 'remote' as const, url: mcpConfig.url ?? '', headers: mcpConfig.headers }
-            : { type: 'local' as const, command: [mcpConfig.command ?? '', ...(mcpConfig.args ?? [])], environment: mcpConfig.env }
-          console.log(`[OpencodeAdapter] Registering MCP server: ${name}`, JSON.stringify(mcpAddConfig))
-
-          // Add MCP server
-          const addResult = await ocClient.mcp.add({
-            body: { name, config: mcpAddConfig },
-            ...(config.workspaceDir && { query: { directory: config.workspaceDir } })
-          })
-
-          if (addResult.error) {
-            console.error(`[OpencodeAdapter] mcp.add error for ${name}:`, addResult.error)
-            continue
-          }
-
-          // Check the add response for immediate server status
-          const addStatus = addResult.data?.[name] as { status: string; error?: string } | undefined
-          if (addStatus) {
-            console.log(`[OpencodeAdapter] mcp.add status for '${name}': ${addStatus.status}${addStatus.error ? ` - ${addStatus.error}` : ''}`)
-            if (addStatus.status === 'failed') {
-              console.error(`[OpencodeAdapter] MCP server '${name}' failed immediately after add: ${addStatus.error}`)
-              continue
-            }
-            if (addStatus.status === 'connected') {
-              console.log(`[OpencodeAdapter] Successfully registered MCP server: ${name} (connected via mcp.add)`)
-              continue
-            }
-          }
-
-          // Connect to MCP server
-          const connectResult = await ocClient.mcp.connect({
-            path: { name },
-            ...(config.workspaceDir && { query: { directory: config.workspaceDir } })
-          })
-
-          if (connectResult.error) {
-            console.error(`[OpencodeAdapter] mcp.connect error for ${name}:`, connectResult.error)
-            continue
-          }
-
-          // Check connect result (returns boolean)
-          if (connectResult.data === false) {
-            console.error(`[OpencodeAdapter] mcp.connect returned false for ${name} — server failed to connect`)
-            continue
-          }
-          connectCandidates.push(name)
-        } catch (mcpError) {
-          console.error(`[OpencodeAdapter] Failed to register MCP server ${name}:`, mcpError)
-        }
-      }
-
-      if (connectCandidates.length > 0) {
-        const readiness = await this.waitForMcpServersReady(ocClient, connectCandidates, config.workspaceDir)
-        for (const name of connectCandidates) {
-          const state = readiness.get(name)
-          if (state === 'connected') {
-            console.log(`[OpencodeAdapter] Successfully registered MCP server: ${name}`)
-          } else if (state === 'failed') {
-            console.error(`[OpencodeAdapter] MCP server '${name}' failed to connect`)
-          } else {
-            console.error(`[OpencodeAdapter] MCP server '${name}' did not reach connected status — tools may not work`)
-          }
-        }
-      }
+      await this.registerMcpServers(ocClient, config.mcpServers, config.workspaceDir)
     }
 
     // Create OpenCode session
@@ -776,7 +830,10 @@ export class OpencodeAdapter implements CodingAgentAdapter {
     const ocSessionId = result.data.id
     this.writeTillDoneSessionConfig(ocSessionId, config.tillDone !== false)
     this.clients.set(ocSessionId, ocClient)
+    this.promptClients.set(ocSessionId, promptClient)
     this.sessionPermissionModes.set(ocSessionId, config.permissionMode || 'ask')
+    if (config.workspaceDir) this.sessionWorkspaceDirs.set(ocSessionId, config.workspaceDir)
+    if (config.mcpServers) this.sessionMcpConfigs.set(ocSessionId, config.mcpServers as Record<string, { type: string; url?: string; headers?: Record<string, string>; command?: string; args?: string[]; env?: Record<string, string> }>)
 
     return ocSessionId
   }
@@ -788,18 +845,32 @@ export class OpencodeAdapter implements CodingAgentAdapter {
     await this.ensureServerRunning(config.serverUrl || DEFAULT_SERVER_URL)
 
     const baseUrl = this.serverUrl || config.serverUrl || DEFAULT_SERVER_URL
-    const ocClient = OpenCodeSDK!.createOpencodeClient({ baseUrl, fetch: noTimeoutFetch as unknown as (request: Request) => ReturnType<typeof fetch> })
+    // Default client uses SDK's built-in timeout for polling/status
+    const ocClient = OpenCodeSDK!.createOpencodeClient({ baseUrl })
+    // Separate client with no timeout for session.prompt() only
+    const promptClient = OpenCodeSDK!.createOpencodeClient({ baseUrl, fetch: noTimeoutFetch as unknown as (request: Request) => ReturnType<typeof fetch> })
 
-    // Register runtime plugins globally (see createSession comment for rationale)
+    // Register runtime plugins via directory-scoped config.update() to avoid
+    // side-effects on other sessions (see createSession comment).
     if (this.pluginFilePaths.length > 0) {
       try {
         await ocClient.config.update({
-          body: { plugin: [...this.pluginFilePaths] } as Record<string, unknown>
+          body: { plugin: [...this.pluginFilePaths] } as Record<string, unknown>,
+          ...(config.workspaceDir && { query: { directory: config.workspaceDir } })
         })
         console.log('[OpencodeAdapter] Registered runtime plugins via config.update:', this.pluginFilePaths)
       } catch (err) {
         console.warn('[OpencodeAdapter] config.update for runtime plugins failed:', err)
       }
+    }
+
+    // Re-register MCP servers — after a 20x restart, stdio MCP server
+    // processes (task-management, GCP logs) are dead and need re-registration.
+    // Remote MCP servers may also have lost their SSE connections.
+    // OpenCode handles transient mid-session reconnections internally, so this
+    // is only needed on resume, not during normal operation.
+    if (config.mcpServers) {
+      await this.registerMcpServers(ocClient, config.mcpServers, config.workspaceDir)
     }
 
     // Validate session exists
@@ -812,8 +883,108 @@ export class OpencodeAdapter implements CodingAgentAdapter {
       throw new Error('Session no longer exists on server')
     }
 
+    // ── Clean up stale session state from previous app instance ──
+    // When the app restarts and resumes a session, tool calls from the
+    // previous instance may still be in "running" state.  The OpenCode
+    // server reports these as "busy" even though nothing is actually
+    // executing.  This blocks new prompts and aborts.
+    //
+    // Fix: abort any in-progress prompt, then delete zombie "running"
+    // tool parts via V2 part.delete.
+    try {
+      await ocClient.session.abort({
+        path: { id: sessionId },
+        ...(config.workspaceDir && { query: { directory: config.workspaceDir } }),
+      })
+      console.log(`[OpencodeAdapter] Aborted any in-progress prompt on resume for session ${sessionId}`)
+    } catch {
+      // Non-fatal: session may already be idle
+    }
+
+    // Delete zombie "running" tool parts that survived the abort.
+    // When a prompt is aborted, individual tool parts remain in
+    // "running" state permanently.  The server counts them as active
+    // work, so the session stays "busy" forever — a catch-22 that
+    // prevents both new prompts and message deletion.
+    // Using v2.part.delete is the only way to clear them.
+    try {
+      if (OpenCodeV2Client) {
+        const v2 = this.v2Client || OpenCodeV2Client.createOpencodeClient({
+          baseUrl: this.serverUrl || DEFAULT_SERVER_URL
+        })
+        if (!this.v2Client) this.v2Client = v2
+
+        // Scan messages for zombie running tool parts
+        const msgsResult = await ocClient.session.messages({
+          path: { id: sessionId },
+          ...(config.workspaceDir && { query: { directory: config.workspaceDir } }),
+        })
+        let zombieCount = 0
+        if (msgsResult.data && Array.isArray(msgsResult.data)) {
+          for (const msg of msgsResult.data) {
+            const msgId = (msg as Record<string, unknown>).info
+              ? ((msg as Record<string, unknown>).info as Record<string, unknown>).id as string
+              : undefined
+            if (!msgId) continue
+            for (const part of ((msg as Record<string, unknown>).parts as Array<Record<string, unknown>>) || []) {
+              if (part.type !== 'tool') continue
+              const state = part.state as Record<string, unknown> | undefined
+              if (state?.status !== 'running') continue
+
+              try {
+                await v2.part.delete({
+                  sessionID: sessionId,
+                  messageID: msgId,
+                  partID: part.id as string,
+                  ...(config.workspaceDir && { directory: config.workspaceDir }),
+                })
+                zombieCount++
+              } catch {
+                // Part may already have been cleaned up
+              }
+            }
+          }
+        }
+        if (zombieCount > 0) {
+          console.log(`[OpencodeAdapter] Deleted ${zombieCount} zombie running tool part(s) on resume for session ${sessionId}`)
+          // Abort again after cleanup to transition the server from busy → idle
+          try {
+            await ocClient.session.abort({
+              path: { id: sessionId },
+              ...(config.workspaceDir && { query: { directory: config.workspaceDir } }),
+            })
+          } catch {
+            // Non-fatal
+          }
+        }
+
+        // Also clear any stale pending permissions
+        const listResult = await v2.permission.list({})
+        if (listResult.data && Array.isArray(listResult.data)) {
+          const allPending = listResult.data as Array<{ id: string; sessionID: string }>
+          const sessionPending = allPending.filter(p => p.sessionID === sessionId)
+          for (const perm of sessionPending) {
+            try {
+              await v2.permission.reply({
+                requestID: perm.id,
+                reply: 'always'
+              })
+              console.log(`[OpencodeAdapter] Auto-approved stale permission ${perm.id} on resume`)
+            } catch {
+              // Permission may have already expired
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn(`[OpencodeAdapter] Failed to clean up stale session state on resume:`, err instanceof Error ? err.message : err)
+    }
+
     this.clients.set(sessionId, ocClient)
+    this.promptClients.set(sessionId, promptClient)
     this.sessionPermissionModes.set(sessionId, config.permissionMode || 'ask')
+    if (config.workspaceDir) this.sessionWorkspaceDirs.set(sessionId, config.workspaceDir)
+    if (config.mcpServers) this.sessionMcpConfigs.set(sessionId, config.mcpServers as Record<string, { type: string; url?: string; headers?: Record<string, string>; command?: string; args?: string[]; env?: Record<string, string> }>)
     this.writeTillDoneSessionConfig(sessionId, config.tillDone !== false)
 
     // Fetch existing messages
@@ -870,7 +1041,9 @@ export class OpencodeAdapter implements CodingAgentAdapter {
   }
 
   async sendPrompt(sessionId: string, parts: MessagePart[], config: SessionConfig): Promise<void> {
-    const ocClient = this.clients.get(sessionId)
+    // Use the no-timeout prompt client for session.prompt() which runs indefinitely.
+    // Falls back to the default client if promptClients entry is missing (shouldn't happen).
+    const ocClient = this.promptClients.get(sessionId) || this.clients.get(sessionId)
     if (!ocClient) {
       throw new Error(`No client found for session ${sessionId}`)
     }
@@ -1271,19 +1444,91 @@ export class OpencodeAdapter implements CodingAgentAdapter {
     return newParts
   }
 
+  async getRunningTools(sessionId: string, config: SessionConfig): Promise<Array<{
+    partId: string
+    toolName: string
+    startTime?: number
+    input?: Record<string, unknown>
+  }>> {
+    const ocClient = this.clients.get(sessionId)
+    if (!ocClient) return []
+
+    try {
+      const messagesResult = await ocClient.session.messages({
+        path: { id: sessionId },
+        ...(config.workspaceDir && { query: { directory: config.workspaceDir } })
+      })
+
+      if (!messagesResult.data || !Array.isArray(messagesResult.data)) return []
+
+      const running: Array<{
+        partId: string
+        toolName: string
+        startTime?: number
+        input?: Record<string, unknown>
+      }> = []
+
+      for (const msg of messagesResult.data) {
+        const parts = (msg as Record<string, unknown>).parts as Array<Record<string, unknown>> | undefined
+        if (!parts || !Array.isArray(parts)) continue
+        for (const part of parts) {
+          if (part.type !== 'tool') continue
+          const state = part.state as Record<string, unknown> | undefined
+          if (!state || state.status !== 'running') continue
+          const timeObj = state.time as Record<string, unknown> | undefined
+          const input = state.input as Record<string, unknown> | undefined
+          running.push({
+            partId: part.id as string,
+            toolName: (part.tool as string) || 'unknown',
+            startTime: timeObj?.start as number | undefined,
+            input: input || undefined
+          })
+        }
+      }
+
+      return running
+    } catch (err) {
+      console.warn(`[OpencodeAdapter] getRunningTools failed for ${sessionId}:`, err instanceof Error ? err.message : err)
+      return []
+    }
+  }
+
   async abortPrompt(sessionId: string, _config: SessionConfig): Promise<void> {
     const abort = this.promptAborts.get(sessionId)
     if (abort) {
       abort.abort()
       this.promptAborts.delete(sessionId)
     }
+
+    // Also abort the session on the server side to ensure the backend
+    // stops processing. Without this, the backend continues running the
+    // old prompt (model generating tokens, bash commands executing) and
+    // rejects or queues new prompts — so the user can't recover by
+    // sending a follow-up message.
+    const ocClient = this.clients.get(sessionId)
+    if (ocClient) {
+      try {
+        await ocClient.session.abort({
+          path: { id: sessionId },
+          ...(_config.workspaceDir && { query: { directory: _config.workspaceDir } }),
+        })
+        console.log(`[OpencodeAdapter] Server-side abort sent for session ${sessionId}`)
+      } catch (err) {
+        // Non-fatal: the local abort is sufficient for the HTTP request.
+        // Server-side abort can fail if session is already idle or not found.
+        console.warn(`[OpencodeAdapter] Server-side abort failed for ${sessionId}:`, err instanceof Error ? err.message : err)
+      }
+    }
   }
 
   async destroySession(sessionId: string, _config: SessionConfig): Promise<void> {
     await this.abortPrompt(sessionId, _config)
     this.clients.delete(sessionId)
+    this.promptClients.delete(sessionId)
     this.pendingPermissions.delete(sessionId)
     this.sessionPermissionModes.delete(sessionId)
+    this.sessionWorkspaceDirs.delete(sessionId)
+    this.sessionMcpConfigs.delete(sessionId)
     this.removeTillDoneSessionConfig(sessionId)
 
     if (this.clients.size > 0) {
@@ -1631,7 +1876,7 @@ export class OpencodeAdapter implements CodingAgentAdapter {
     if (!OpenCodeV2Client) throw new Error('OpenCode V2 SDK not loaded')
 
     const baseUrl = this.serverUrl || config.serverUrl || DEFAULT_SERVER_URL
-    this.v2Client = OpenCodeV2Client.createOpencodeClient({ baseUrl, fetch: noTimeoutFetch as unknown as typeof fetch })
+    this.v2Client = OpenCodeV2Client.createOpencodeClient({ baseUrl })
     return this.v2Client
   }
 
@@ -1744,11 +1989,14 @@ export class OpencodeAdapter implements CodingAgentAdapter {
     sessionId: string,
     approved: boolean,
     optionId?: string
-  ): Promise<void> {
+  ): Promise<boolean> {
     const queue = this.pendingPermissions.get(sessionId)
     if (!queue || queue.length === 0) {
-      console.warn(`[OpencodeAdapter] No pending permission for session ${sessionId}`)
-      return
+      // Fallback: try the V2 API for pending permissions.
+      // This handles the case where pendingPermissions was lost (e.g., app restart
+      // or watchdog abort) but the permission is still pending in OpenCode.
+      console.warn(`[OpencodeAdapter] No pending permission in memory for session ${sessionId}, trying V2 API fallback`)
+      return await this.respondToPermissionViaV2(sessionId, approved, optionId)
     }
 
     const pending = queue.shift()!
@@ -1786,6 +2034,76 @@ export class OpencodeAdapter implements CodingAgentAdapter {
     // Trigger immediate poll so agent-manager sees next pending permission (if any)
     if (this.onDataAvailable) {
       this.onDataAvailable(sessionId)
+    }
+    return true
+  }
+
+  /**
+   * Fallback: respond to a pending permission via the OpenCode V2 API.
+   * Used when the in-memory pendingPermissions map is empty (e.g., after
+   * app restart or watchdog abort) but the permission is still pending
+   * in the OpenCode backend.
+   *
+   * Uses v2Client.permission.list() (top-level, lists all sessions) and
+   * v2Client.permission.reply() to find and respond to the permission.
+   */
+  private async respondToPermissionViaV2(
+    sessionId: string,
+    approved: boolean,
+    optionId?: string
+  ): Promise<boolean> {
+    try {
+      if (!OpenCodeV2Client) {
+        console.warn(`[OpencodeAdapter] Cannot fetch permissions — V2 SDK not loaded`)
+        return false
+      }
+      const v2 = this.v2Client || OpenCodeV2Client.createOpencodeClient({
+        baseUrl: this.serverUrl || DEFAULT_SERVER_URL
+      })
+      if (!this.v2Client) this.v2Client = v2
+
+      // permission.list() returns ALL pending permissions across all sessions.
+      // Filter to the target session.
+      const listResult = await v2.permission.list({})
+      if (listResult.error || !listResult.data) {
+        console.warn(`[OpencodeAdapter] V2 permission.list() failed or returned no data for session ${sessionId}`)
+        return false
+      }
+
+      const allPending = listResult.data as Array<{ id: string; sessionID: string; permission: string; patterns: string[] }>
+      const sessionPending = allPending.filter(p => p.sessionID === sessionId)
+      if (sessionPending.length === 0) {
+        console.warn(`[OpencodeAdapter] No pending permissions found via V2 API for session ${sessionId}`)
+        return false
+      }
+
+      const first = sessionPending[0]
+
+      let reply: 'once' | 'always' | 'reject'
+      if (!approved) {
+        reply = 'reject'
+      } else if (optionId === 'allow-always' || optionId === 'approved-for-session') {
+        reply = 'always'
+      } else {
+        reply = 'once'
+      }
+
+      const directory = this.sessionWorkspaceDirs.get(sessionId)
+      console.log(`[OpencodeAdapter] Responding to permission ${first.id} via V2 API: ${reply} (permission=${first.permission}, patterns=${first.patterns.join(', ')})`)
+      await v2.permission.reply({
+        requestID: first.id,
+        reply,
+        ...(directory && { directory })
+      })
+
+      // Trigger immediate poll so agent-manager sees the unblocked session
+      if (this.onDataAvailable) {
+        this.onDataAvailable(sessionId)
+      }
+      return true
+    } catch (err) {
+      console.error(`[OpencodeAdapter] V2 permission fallback failed for session ${sessionId}:`, err)
+      return false
     }
   }
 
@@ -1910,16 +2228,41 @@ export class OpencodeAdapter implements CodingAgentAdapter {
 
   /**
    * Silently approve a permission request (used when permissionMode is 'allow').
+   * Uses the V2 SDK permission.reply() which hits the correct endpoint
+   * (POST /permission/{requestID}/reply). The V1 endpoint
+   * (POST /session/{id}/permissions/{permissionID}) returns 404 for
+   * permissions created by the V2 system.
    */
   private async autoApprovePermission(sessionId: string, permissionId: string): Promise<void> {
+    // Resolve the workspace directory for this session — the OpenCode server
+    // may need it to properly scope the permission reply.
+    const directory = this.sessionWorkspaceDirs.get(sessionId)
+
     try {
+      // Try V2 SDK first — this is the correct endpoint for V2 permissions
+      if (OpenCodeV2Client) {
+        const v2 = this.v2Client || OpenCodeV2Client.createOpencodeClient({
+          baseUrl: this.serverUrl || DEFAULT_SERVER_URL
+        })
+        if (!this.v2Client) this.v2Client = v2
+
+        await v2.permission.reply({
+          requestID: permissionId,
+          reply: 'always',
+          ...(directory && { directory })
+        })
+        console.log(`[OpencodeAdapter] Auto-approved permission ${permissionId} via V2 API${directory ? ` (dir=${directory})` : ''}`)
+        return
+      }
+
+      // Fallback to raw fetch if V2 SDK is not available
       const baseUrl = this.serverUrl || DEFAULT_SERVER_URL
-      const url = `${baseUrl}/session/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(permissionId)}`
-      // OpenCode accepts "once", "always", or "reject"
+      const dirQuery = directory ? `?directory=${encodeURIComponent(directory)}` : ''
+      const url = `${baseUrl}/permission/${encodeURIComponent(permissionId)}/reply${dirQuery}`
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ response: 'always' })
+        body: JSON.stringify({ reply: 'always' })
       })
       if (!res.ok) {
         console.warn(`[OpencodeAdapter] Auto-approve HTTP ${res.status}: ${await res.text().catch(() => '')}`)

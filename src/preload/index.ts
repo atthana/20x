@@ -97,8 +97,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('agentSession:abort', sessionId),
     stop: (sessionId: string): Promise<{ success: boolean }> =>
       ipcRenderer.invoke('agentSession:stop', sessionId),
+    stopByTaskId: (taskId: string): Promise<{ success: boolean; sessionId: string | null }> =>
+      ipcRenderer.invoke('agentSession:stopByTaskId', taskId),
     send: (sessionId: string, message: string, taskId?: string, agentId?: string, attachments?: Array<{ id: string; filename: string; size: number; mime_type: string }>): Promise<{ success: boolean; newSessionId?: string }> =>
       ipcRenderer.invoke('agentSession:send', sessionId, message, taskId, agentId, attachments),
+    sendByTaskId: (taskId: string, message: string, attachments?: Array<{ id: string; filename: string; size: number; mime_type: string }>): Promise<{ success: boolean; sessionId: string | null; newSessionId?: string }> =>
+      ipcRenderer.invoke('agentSession:sendByTaskId', taskId, message, attachments),
     approve: (sessionId: string, approved: boolean, message?: string): Promise<{ success: boolean }> =>
       ipcRenderer.invoke('agentSession:approve', sessionId, approved, message),
     syncSkills: (sessionId: string): Promise<{ created: string[]; updated: string[]; unchanged: string[] }> =>
@@ -106,7 +110,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     syncSkillsForTask: (taskId: string): Promise<{ created: string[]; updated: string[]; unchanged: string[] }> =>
       ipcRenderer.invoke('agentSession:syncSkillsForTask', taskId),
     learnFromSession: (sessionId: string, message: string): Promise<{ created: string[]; updated: string[]; unchanged: string[] }> =>
-      ipcRenderer.invoke('agentSession:learnFromSession', sessionId, message)
+      ipcRenderer.invoke('agentSession:learnFromSession', sessionId, message),
+    getRawTranscript: (taskId: string): Promise<Array<{ role: string; parts: Array<{ type: string; content?: string; tool?: { name: string; status?: string; input?: string; output?: string; error?: string } }> }>> =>
+      ipcRenderer.invoke('agentSession:getRawTranscript', taskId)
   },
   agentConfig: {
     getProviders: (serverUrl?: string, backendType?: string): Promise<{ providers: { id: string; name: string; models: unknown }[]; default: Record<string, string> } | null> =>

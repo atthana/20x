@@ -116,8 +116,16 @@ export const agentSessionApi = {
     return window.electronAPI.agentSession.stop(sessionId)
   },
 
+  stopByTaskId: (taskId: string): Promise<{ success: boolean; sessionId: string | null }> => {
+    return window.electronAPI.agentSession.stopByTaskId(taskId)
+  },
+
   send: (sessionId: string, message: string, taskId?: string, agentId?: string, attachments?: AgentMessageAttachment[]): Promise<{ success: boolean; newSessionId?: string }> => {
     return window.electronAPI.agentSession.send(sessionId, message, taskId, agentId, attachments)
+  },
+
+  sendByTaskId: (taskId: string, message: string, attachments?: AgentMessageAttachment[]): Promise<{ success: boolean; sessionId: string | null; newSessionId?: string }> => {
+    return window.electronAPI.agentSession.sendByTaskId(taskId, message, attachments)
   },
 
   approve: (sessionId: string, approved: boolean, message?: string): Promise<{ success: boolean }> => {
@@ -134,6 +142,10 @@ export const agentSessionApi = {
 
   learnFromSession: (sessionId: string, message: string): Promise<SkillSyncResult> => {
     return window.electronAPI.agentSession.learnFromSession(sessionId, message)
+  },
+
+  getRawTranscript: (taskId: string): Promise<Array<{ role: string; parts: Array<{ type: string; content?: string; tool?: { name: string; status?: string; input?: string; output?: string; error?: string } }> }>> => {
+    return window.electronAPI.agentSession.getRawTranscript(taskId)
   }
 }
 

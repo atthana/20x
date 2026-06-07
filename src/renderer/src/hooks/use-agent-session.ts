@@ -86,22 +86,39 @@ export function useAgentSession(taskId: string | undefined) {
   const stop = useCallback(async () => {
     if (!taskId) return
     const currentSession = useAgentStore.getState().sessions.get(taskId)
-    if (!currentSession?.sessionId) return
-    console.log('[use-agent-session] stop() called for session:', currentSession.sessionId)
-    console.trace('[use-agent-session] stop() stack trace')
-    await agentSessionApi.stop(currentSession.sessionId)
+    if (currentSession?.sessionId) {
+      console.log('[use-agent-session] stop() called for session:', currentSession.sessionId)
+      await agentSessionApi.stop(currentSession.sessionId)
+    } else {
+      // Fallback: session mapping lost in renderer — ask the backend
+      // to find and stop the session by taskId directly.
+      console.log('[use-agent-session] stop() no sessionId, falling back to stopByTaskId:', taskId)
+      await agentSessionApi.stopByTaskId(taskId)
+    }
     endSession(taskId)
   }, [taskId, endSession])
 
   const sendMessage = useCallback(
     async (message: string, options?: SendMessageOptions) => {
+      if (!taskId) throw new Error('No taskId')
       // Get latest session from store, not from closure
-      const currentSession = useAgentStore.getState().sessions.get(taskId!)
-      if (!currentSession?.sessionId) throw new Error('No active session')
-      const result = await agentSessionApi.send(currentSession.sessionId, message, taskId, currentSession.agentId, options?.attachments)
-      // Session was recreated on the main process — update renderer store
-      if (result.newSessionId && taskId) {
-        initSession(taskId, result.newSessionId, currentSession.agentId)
+      const currentSession = useAgentStore.getState().sessions.get(taskId)
+      if (currentSession?.sessionId) {
+        const result = await agentSessionApi.send(currentSession.sessionId, message, taskId, currentSession.agentId, options?.attachments)
+        // Session was recreated on the main process — update renderer store
+        if (result.newSessionId && taskId) {
+          initSession(taskId, result.newSessionId, currentSession.agentId)
+        }
+      } else {
+        // Fallback: session mapping lost in renderer — ask the backend
+        // to find (or resume/create) the session by taskId directly.
+        console.log('[use-agent-session] sendMessage() no sessionId, falling back to sendByTaskId:', taskId)
+        const result = await agentSessionApi.sendByTaskId(taskId, message, options?.attachments)
+        // Update renderer store with the recovered/new sessionId
+        const resolvedSessionId = result.newSessionId || result.sessionId
+        if (resolvedSessionId) {
+          initSession(taskId, resolvedSessionId, currentSession?.agentId ?? '')
+        }
       }
     },
     [taskId, initSession]

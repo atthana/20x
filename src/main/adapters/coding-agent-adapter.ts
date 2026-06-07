@@ -102,6 +102,7 @@ export interface MessagePart {
   }
   update?: boolean // Mark as update to existing message
   realSessionId?: string // Real session ID from backend (for updating database)
+  receivedAt?: number // Unix ms when this event was originally received (for replay timestamp preservation)
   taskProgress?: {
     taskId: string
     status: 'started' | 'running' | 'completed' | 'failed' | 'stopped'
@@ -185,6 +186,19 @@ export interface CodingAgentAdapter {
    * Abort ongoing prompt
    */
   abortPrompt(sessionId: string, config: SessionConfig): Promise<void>
+
+  /**
+   * Get tools currently in "running" state.
+   * Used by the stuck-tool detector to abort tools that hang without producing
+   * data (e.g. cross-workspace file reads that the server silently blocks).
+   * Optional — returns empty array if the adapter doesn't support it.
+   */
+  getRunningTools?(sessionId: string, config: SessionConfig): Promise<Array<{
+    partId: string
+    toolName: string
+    startTime?: number // Unix ms when the tool started
+    input?: Record<string, unknown> // Tool input (e.g. { filePath: "..." })
+  }>>
 
   /**
    * Destroy/cleanup session
