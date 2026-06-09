@@ -397,11 +397,9 @@ export function OnboardingWizard({ open, onOpenChange }: OnboardingWizardProps) 
   )
 
   /**
-   * Run post-auth setup in background: close dialog immediately,
-   * show progress via the general-purpose progress toast.
-   *
-   * Always installs the binary + starts the server, even if an agent
-   * record already exists (it may be stale from a previous version).
+   * Run post-auth setup: kick off install + config in the background (toast),
+   * then immediately advance the wizard to the templates screen so the user
+   * can continue onboarding while the agent installs.
    */
   const setupRunning = React.useRef(false)
   const runPostAuthFlow = useCallback(async () => {
@@ -412,11 +410,19 @@ export function OnboardingWizard({ open, onOpenChange }: OnboardingWizardProps) 
     const toasts = useProgressToastStore.getState()
     const TOAST_ID = 'agent-setup'
 
-    // Close dialog immediately — don't block the main UI
-    onOpenChange(false)
-
-    // Start background progress toast
+    // Show background progress toast
     toasts.show(TOAST_ID, 'Setting up agent', 'Detecting installed tools...')
+
+    // Move to templates screen immediately — don't wait for install
+    fetchPresetups().then(() => {
+      const templates = useDashboardStore.getState().presetupTemplates
+      if (templates.length > 0) {
+        setScreen(OnboardingScreen.TEMPLATES)
+      } else {
+        // No templates — close the dialog, toast is enough
+        onOpenChange(false)
+      }
+    })
 
     try {
       // Phase 1: Detect tools
@@ -456,19 +462,8 @@ export function OnboardingWizard({ open, onOpenChange }: OnboardingWizardProps) 
       await createDefaultAgent(CodingAgentType.OPENCODE)
       await useAgentStore.getState().fetchAgents()
 
-      // Phase 4: Fetch templates
-      toasts.update(TOAST_ID, { message: 'Loading templates...', percent: 90 })
-      await fetchPresetups()
-
       // Done!
       toasts.finish(TOAST_ID, 'Agent ready — you can start working!')
-
-      // If templates exist, show them
-      const templates = useDashboardStore.getState().presetupTemplates
-      if (templates.length > 0) {
-        setScreen(OnboardingScreen.TEMPLATES)
-        onOpenChange(true)
-      }
     } catch (err) {
       console.error('[OnboardingWizard] Background setup failed:', err)
       toasts.fail(TOAST_ID, 'Setup failed — configure agent in Settings')
