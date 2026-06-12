@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>20x : คู่มือทำความเข้าใจโปรเจคฉบับสมบูรณ์</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-card: #161b22;
+    --bg-code: #1f2937;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #9da7b3;
+    --accent: #58a6ff;
+    --accent2: #f0883e;
+    --green: #3fb950;
+    --purple: #bc8cff;
+    --yellow: #d29922;
+    --red: #f85149;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Sukhumvit Set", "Noto Sans Thai", "Sarabun", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.85;
+    font-size: 16px;
+  }
+  .container { display: flex; max-width: 1400px; margin: 0 auto; }
+
+  /* Sidebar TOC */
+  nav {
+    width: 290px; flex-shrink: 0; position: sticky; top: 0; height: 100vh;
+    overflow-y: auto; padding: 28px 16px; border-right: 1px solid var(--border);
+  }
+  nav h3 { color: var(--accent); font-size: 14px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 14px; }
+  nav a {
+    display: block; color: var(--text-dim); text-decoration: none; font-size: 13.5px;
+    padding: 5px 10px; border-radius: 6px; margin-bottom: 2px;
+  }
+  nav a:hover { background: var(--bg-card); color: var(--text); }
+
+  main { flex: 1; padding: 40px 48px 120px; min-width: 0; }
+
+  /* Hero */
+  .hero {
+    background: linear-gradient(135deg, #1a2236 0%, #16202c 60%, #14261f 100%);
+    border: 1px solid var(--border); border-radius: 16px; padding: 40px; margin-bottom: 48px;
+  }
+  .hero h1 { font-size: 40px; margin-bottom: 8px; }
+  .hero h1 span { color: var(--accent); }
+  .hero p.tagline { font-size: 19px; color: var(--accent2); font-weight: 600; margin-bottom: 16px; }
+  .hero p { color: var(--text-dim); }
+  .badges { margin-top: 18px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .badge {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 999px;
+    padding: 4px 14px; font-size: 12.5px; color: var(--text-dim);
+  }
+
+  h2 {
+    font-size: 27px; margin: 56px 0 18px; padding-bottom: 10px;
+    border-bottom: 2px solid var(--border); color: var(--accent);
+  }
+  h3 { font-size: 20px; margin: 30px 0 12px; color: var(--accent2); }
+  h4 { font-size: 16.5px; margin: 22px 0 8px; color: var(--purple); }
+  p { margin-bottom: 14px; }
+  ul, ol { margin: 0 0 16px 26px; }
+  li { margin-bottom: 7px; }
+  strong { color: #fff; }
+  a { color: var(--accent); }
+
+  code {
+    background: var(--bg-code); padding: 2px 7px; border-radius: 5px;
+    font-family: "SF Mono", "JetBrains Mono", Consolas, monospace; font-size: 13.5px; color: #ffa657;
+  }
+  pre {
+    background: var(--bg-code); border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px 20px; overflow-x: auto; margin: 16px 0 22px;
+    font-size: 13.5px; line-height: 1.65;
+  }
+  pre code { background: none; padding: 0; color: #c9d1d9; }
+
+  table {
+    width: 100%; border-collapse: collapse; margin: 16px 0 26px;
+    background: var(--bg-card); border-radius: 10px; overflow: hidden; font-size: 14.5px;
+  }
+  th { background: #1c2530; color: var(--accent); text-align: left; padding: 11px 15px; }
+  td { padding: 10px 15px; border-top: 1px solid var(--border); vertical-align: top; }
+  tr:hover td { background: #1a212b; }
+
+  .card {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 22px 26px; margin: 18px 0;
+  }
+  .card.usecase { border-left: 4px solid var(--green); }
+  .card.usecase .label { color: var(--green); font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .card.django { border-left: 4px solid var(--purple); }
+  .card.django .label { color: var(--purple); font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .card.warn { border-left: 4px solid var(--yellow); }
+  .card.warn .label { color: var(--yellow); font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+
+  .flow {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px 26px; margin: 18px 0;
+  }
+  .flow-step { display: flex; gap: 16px; padding: 10px 0; }
+  .flow-step .num {
+    flex-shrink: 0; width: 32px; height: 32px; border-radius: 50%;
+    background: var(--accent); color: #0d1117; font-weight: 800;
+    display: flex; align-items: center; justify-content: center; font-size: 14px;
+  }
+  .flow-step .body strong { display: block; margin-bottom: 2px; }
+  .flow-step .body span { color: var(--text-dim); font-size: 14.5px; }
+
+  .status-pill { display: inline-block; padding: 2px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; margin: 0 2px; }
+  .s-grey { background: #30363d; color: #c9d1d9; }
+  .s-yellow { background: #3a2d12; color: #d29922; }
+  .s-purple { background: #2d2244; color: #bc8cff; }
+  .s-blue { background: #122d4d; color: #58a6ff; }
+  .s-green { background: #12341c; color: #3fb950; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 1000px) { .grid2 { grid-template-columns: 1fr; } nav { display: none; } main { padding: 24px; } }
+
+  .toc-num { color: var(--accent2); font-weight: 700; margin-right: 6px; }
+  footer { margin-top: 70px; padding-top: 24px; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 13.5px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<nav>
+  <h3>สารบัญ</h3>
+  <a href="#what"><span class="toc-num">1</span>20x คืออะไร</a>
+  <a href="#stack"><span class="toc-num">2</span>Tech Stack</a>
+  <a href="#arch"><span class="toc-num">3</span>สถาปัตยกรรม (เทียบ Django)</a>
+  <a href="#folders"><span class="toc-num">4</span>โครงสร้างโฟลเดอร์</a>
+  <a href="#db"><span class="toc-num">5</span>Database Schema</a>
+  <a href="#lifecycle"><span class="toc-num">6</span>Task Lifecycle</a>
+  <a href="#agents"><span class="toc-num">7</span>Agent Orchestration</a>
+  <a href="#triage"><span class="toc-num">8</span>Triage Agent</a>
+  <a href="#skills"><span class="toc-num">9</span>Skills + Auto-Learning</a>
+  <a href="#worktree"><span class="toc-num">10</span>Git Worktree</a>
+  <a href="#integrations"><span class="toc-num">11</span>Integrations</a>
+  <a href="#ipc"><span class="toc-num">12</span>IPC Architecture</a>
+  <a href="#heartbeat"><span class="toc-num">13</span>Heartbeat Monitoring</a>
+  <a href="#misc"><span class="toc-num">14</span>ส่วนประกอบอื่นๆ</a>
+  <a href="#setup"><span class="toc-num">15</span>วิธีติดตั้งและรัน</a>
+  <a href="#e2e"><span class="toc-num">16</span>Use Case End-to-End</a>
+  <a href="#reading"><span class="toc-num">17</span>เส้นทางอ่านโค้ด</a>
+</nav>
+
+<main>
+
+<div class="hero">
+  <h1>🚀 <span>20x</span> : คู่มือฉบับสมบูรณ์</h1>
+  <p class="tagline">"One app. All your tasks. Powered by AI agents."</p>
+  <p>Desktop app ที่เปลี่ยน task list ของคุณให้กลายเป็นกองทัพ AI : ดึงงานจาก Linear / Notion / GitHub ฯลฯ
+     ให้ AI agent (Claude Code, OpenCode, Codex) หยิบไปทำเองอัตโนมัติ โดยมีมนุษย์คอย approve จุดเสี่ยง
+     ทุกอย่างรันในเครื่องคุณ ไม่มี cloud ไม่มี subscription</p>
+  <div class="badges">
+    <span class="badge">📦 v0.0.104</span>
+    <span class="badge">⚖️ MIT License</span>
+    <span class="badge">🏢 โดย Peakflo</span>
+    <span class="badge">💻 macOS / Windows / Linux</span>
+    <span class="badge">🔒 Local-first (SQLite)</span>
+  </div>
+</div>
+
+<!-- ============ 1 ============ -->
+<h2 id="what">1. 20x คืออะไร และมีไว้ทำไม</h2>
+<p><strong>ปัญหา:</strong> เครื่องมือ AI ส่วนใหญ่บังคับให้เรา copy-paste context ไปมาระหว่างแท็บ
+เช่น copy ticket จาก Jira ไปวางใน ChatGPT แล้ว copy โค้ดกลับมาวางใน editor ซึ่งเสียเวลามหาศาล</p>
+<p><strong>แนวคิดของ 20x:</strong> กลับด้านความคิด <em>"ให้งานวิ่งไปหา AI แทนที่เราจะป้อนงานให้ AI"</em></p>
+
+<div class="flow">
+  <div class="flow-step"><div class="num">1</div><div class="body"><strong>งานไหลเข้ามา</strong><span>จาก Linear, YouTrack, HubSpot, GitHub Issues, Notion, GitLab, Peakflo หรือสร้างเองในแอป</span></div></div>
+  <div class="flow-step"><div class="num">2</div><div class="body"><strong>Triage Agent คัดแยก</strong><span>AI วิเคราะห์งาน กำหนด priority, เลือก agent ที่เหมาะ, เลือก skills และ git repos ให้อัตโนมัติ</span></div></div>
+  <div class="flow-step"><div class="num">3</div><div class="body"><strong>Agent ลงมือทำ</strong><span>อ่าน context, เขียนโค้ดใน git worktree แยกของตัวเอง, เปิด PR โดยเราดู transcript แบบ real-time</span></div></div>
+  <div class="flow-step"><div class="num">4</div><div class="body"><strong>HITL Review</strong><span>ก่อนทำสิ่งเสี่ยง (เช่นรัน shell command อันตราย) agent หยุดถามมนุษย์ก่อนเสมอ</span></div></div>
+  <div class="flow-step"><div class="num">5</div><div class="body"><strong>Feedback Loop</strong><span>หลังจบงาน เราให้ดาว + คอมเมนต์ ระบบสกัดบทเรียนเป็น "Skill" ทำให้ agent ฉลาดขึ้นเรื่อยๆ</span></div></div>
+</div>
+
+<!-- ============ 2 ============ -->
+<h2 id="stack">2. Tech Stack ทั้งหมด</h2>
+<table>
+  <tr><th>Layer</th><th>เทคโนโลยี</th><th>เทียบกับโลก Django</th></tr>
+  <tr><td>App Shell</td><td><strong>Electron 34</strong></td><td>Runtime ที่ห่อทั้งแอป (Chromium + Node.js)</td></tr>
+  <tr><td>Build</td><td>electron-vite + Vite 6</td><td>Build pipeline / collectstatic</td></tr>
+  <tr><td>Frontend</td><td><strong>React 19</strong> + TypeScript</td><td>แทน Django Templates (เป็น SPA เต็มตัว)</td></tr>
+  <tr><td>Styling</td><td>Tailwind CSS 4 + Radix UI + cva</td><td>CSS utility + headless components</td></tr>
+  <tr><td>State</td><td><strong>Zustand 5</strong> (~25 stores)</td><td>State ฝั่ง client</td></tr>
+  <tr><td>Database</td><td><strong>SQLite</strong> (better-sqlite3, WAL)</td><td>แทน PostgreSQL แต่ embedded + เขียน SQL ตรงๆ ไม่มี ORM</td></tr>
+  <tr><td>Agent SDKs</td><td>@anthropic-ai/claude-agent-sdk<br>@opencode-ai/sdk<br>@zed-industries/codex-acp</td><td>3rd-party API clients (3 ค่าย AI)</td></tr>
+  <tr><td>MCP</td><td>@modelcontextprotocol/sdk</td><td>โปรโตคอลมาตรฐานให้ AI เรียก tools</td></tr>
+  <tr><td>Terminal</td><td>node-pty + xterm.js</td><td>Terminal จริงฝังในแอป</td></tr>
+  <tr><td>Enterprise Auth</td><td>Supabase</td><td>ใช้เฉพาะ login องค์กร (ไม่เก็บข้อมูลงาน)</td></tr>
+  <tr><td>Testing</td><td>Vitest + happy-dom</td><td>pytest + test client</td></tr>
+  <tr><td>Updates</td><td>electron-updater</td><td>อัปเดตแอปจาก GitHub Releases</td></tr>
+  <tr><td>Package Manager</td><td><strong>pnpm 9</strong> (ห้ามใช้ npm)</td><td>pip/poetry</td></tr>
+  <tr><td>CI/CD</td><td>GitHub Actions</td><td>build + release เมื่อ push tag</td></tr>
+</table>
+
+<!-- ============ 3 ============ -->
+<h2 id="arch">3. สถาปัตยกรรม Electron (เทียบกับ Django)</h2>
+<p>Electron app ประกอบด้วย <strong>2 process ที่แยกกันเด็ดขาด</strong> ตรงนี้สำคัญที่สุดสำหรับคนมาจาก backend:</p>
+<pre><code>┌──────────────────────────────────────────────────────────────┐
+│  Renderer Process (React UI)         ← เหมือน "Frontend/SPA"  │
+│  ❌ ไม่มีสิทธิ์แตะ Node.js / ไฟล์ / database โดยตรง            │
+├──────────────────────────────────────────────────────────────┤
+│  Preload Bridge (src/preload)        ← เหมือน "API Gateway"   │
+│  ✅ whitelist ว่า UI เรียกอะไรได้บ้าง (window.electronAPI)     │
+├──────────────────────────────────────────────────────────────┤
+│  Main Process (Node.js)              ← เหมือน "Django Backend"│
+│  ✅ SQLite, file system, spawn agent processes, HTTP servers  │
+└──────────────────────────────────────────────────────────────┘
+
+Data Flow:  React UI → Zustand → IPC Client → Preload → Main → SQLite</code></pre>
+
+<div class="card django">
+  <div class="label">🐍 เทียบ Django ตรงๆ</div>
+  <table>
+    <tr><th>Django</th><th>20x (Electron)</th></tr>
+    <tr><td>views.py + DRF ViewSets</td><td><code>src/main/ipc-handlers.ts</code></td></tr>
+    <tr><td>models.py + ORM</td><td><code>src/main/database.ts</code> (SQL ตรงๆ)</td></tr>
+    <tr><td>migrations/</td><td><code>runMigrations()</code> + <code>SCHEMA_VERSION</code></td></tr>
+    <tr><td>Celery workers</td><td>agent-manager, heartbeat-scheduler, recurrence-scheduler</td></tr>
+    <tr><td>urls.py</td><td>ชื่อ IPC channel เช่น <code>db:getTasks</code>, <code>agentSession:start</code></td></tr>
+    <tr><td>DRF Serializers</td><td>TypeScript interfaces</td></tr>
+    <tr><td>settings.py</td><td>ตาราง <code>settings</code> (key-value)</td></tr>
+    <tr><td>Django Apps (3rd party)</td><td>Plugins ใน <code>src/main/plugins/</code></td></tr>
+  </table>
+  <p style="margin:0"><strong>ความปลอดภัย:</strong> เปิด <code>contextIsolation: true</code> + <code>nodeIntegration: false</code>
+  แปลว่าโค้ด React ไม่มีทางแตะ DB ได้เอง ต้องผ่าน bridge เท่านั้น (เหมือน frontend ที่เรียกได้แค่ REST API)</p>
+</div>
+
+<!-- ============ 4 ============ -->
+<h2 id="folders">4. โครงสร้างโฟลเดอร์</h2>
+<pre><code>20x/
+├── src/
+│   ├── main/                  ← "Backend" ทั้งหมด (Node.js)
+│   │   ├── index.ts           ← Entry point: สร้างหน้าต่าง + init ทุก manager
+│   │   ├── database.ts        ← Schema + Migration + CRUD (~100KB)
+│   │   ├── agent-manager.ts   ← หัวใจ: จัดการ AI sessions (~188KB ใหญ่สุด)
+│   │   ├── ipc-handlers.ts    ← "endpoints" ทั้งหมดที่ UI เรียกได้ (~81KB)
+│   │   ├── heartbeat-scheduler.ts / recurrence-scheduler.ts
+│   │   ├── worktree-manager.ts        ← git worktree แยกต่องาน
+│   │   ├── task-api-server.ts         ← HTTP API ให้ agent เรียกกลับ
+│   │   ├── mobile-api-server.ts       ← HTTP + WebSocket สำหรับมือถือ
+│   │   ├── secret-broker.ts           ← แจก secrets เข้ารหัสให้ agent
+│   │   ├── enterprise-auth.ts / enterprise-sync.ts  ← Supabase + Workflo
+│   │   ├── adapters/          ← ตัวเชื่อม AI 3 ค่าย (Claude/OpenCode/Codex)
+│   │   ├── plugins/           ← Integrations (linear, hubspot, notion...)
+│   │   ├── oauth/             ← OAuth flows
+│   │   └── mcp-servers/       ← MCP server ในตัว (task tools)
+│   ├── preload/index.ts       ← Bridge: expose window.electronAPI
+│   ├── renderer/src/          ← "Frontend" (React 19)
+│   │   ├── components/        ← layout, dashboard, tasks, agents, canvas, skills, settings, ui
+│   │   ├── stores/            ← Zustand ~25 ตัว
+│   │   ├── hooks/             ← use-agent-auto-start (คิว auto-run) ฯลฯ
+│   │   └── lib/ipc-client.ts  ← wrapper เรียก electronAPI แบบ type-safe
+│   ├── mobile/                ← Web app แยกสำหรับมือถือ
+│   └── shared/constants.ts    ← TaskStatus enum + ค่าคงที่ร่วม
+├── docs/                      ← เอกสารเชิงลึก 13 ไฟล์
+├── scripts/                   ← build, release, notarize, rebuild native
+├── remotion/                  ← render ภาพ preview UI
+├── .github/workflows/         ← CI: verify / release / auto-tag
+├── AGENTS.md                  ← สเปคสถาปัตยกรรม multi-agent
+└── WINDOWS_PORT_LOG.md        ← บันทึกการ port ไป Windows</code></pre>
+
+<!-- ============ 5 ============ -->
+<h2 id="db">5. Database Schema (SQLite)</h2>
+<p>ทุกอย่างอยู่ใน SQLite ไฟล์เดียวในเครื่อง (โหมด WAL) Schema ทั้งหมดอยู่ใน <code>src/main/database.ts</code></p>
+<div class="card django">
+  <div class="label">🐍 มุมมอง Django Dev</div>
+  <p style="margin:0">ไม่มี ORM ไม่มีไฟล์ migration แยก ใช้ <code>createTables()</code> สำหรับติดตั้งใหม่ +
+  <code>runMigrations()</code> เช็ค <code>SCHEMA_VERSION</code> แล้ว <code>ALTER TABLE</code> ทีละขั้น
+  (มีคู่มือใน <code>docs/database-migrations.md</code>)</p>
+</div>
+<table>
+  <tr><th>ตาราง</th><th>หน้าที่</th></tr>
+  <tr><td><strong>tasks</strong></td><td>งานทั้งหมด: status, priority, labels, repos, agent_id, skill_ids, snoozed_until, ฟิลด์ recurring (cron), ฟิลด์ heartbeat, parent_task_id (subtask), feedback_rating</td></tr>
+  <tr><td><strong>agents</strong></td><td>คอนฟิก agent: coding_agent (claude-code/opencode/codex), model, system_prompt, mcp_servers, skill_ids</td></tr>
+  <tr><td><strong>mcp_servers</strong></td><td>MCP servers: local (command+args) หรือ remote (url+headers)</td></tr>
+  <tr><td><strong>task_sources</strong></td><td>การเชื่อมแหล่งงานภายนอก: plugin_id, list_tool, update_tool, last_synced_at</td></tr>
+  <tr><td><strong>skills</strong></td><td>คลังความรู้: content (markdown), version, confidence (0-1), uses, soft delete</td></tr>
+  <tr><td><strong>heartbeat_logs</strong></td><td>ประวัติการเช็ค heartbeat</td></tr>
+  <tr><td><strong>oauth_tokens</strong></td><td>OAuth tokens <strong>เข้ารหัสด้วย Electron safeStorage</strong> (BLOB)</td></tr>
+  <tr><td><strong>secrets</strong></td><td>API keys เข้ารหัส ผูกกับ env_var_name</td></tr>
+  <tr><td><strong>marketplace_sources / installed_plugins</strong></td><td>Claude plugin marketplace</td></tr>
+  <tr><td><strong>settings</strong></td><td>key-value settings (เหมือน django-constance)</td></tr>
+</table>
+<p><strong>จุดเด่นด้านความปลอดภัย:</strong> token/secret ทุกตัวเข้ารหัสผ่าน OS Keychain ก่อนลง DB,
+ใช้ parameterized queries ทั้งหมด, skills ใช้ soft delete</p>
+
+<!-- ============ 6 ============ -->
+<h2 id="lifecycle">6. วงจรชีวิตของ Task (Task Lifecycle)</h2>
+<p>Task มี 6 สถานะ (ประกาศใน <code>src/shared/constants.ts</code>):</p>
+<p style="text-align:center; margin: 22px 0;">
+  <span class="status-pill s-grey">not_started</span> →
+  <span class="status-pill s-grey">triaging</span> →
+  <span class="status-pill s-yellow">agent_working</span> →
+  <span class="status-pill s-purple">ready_for_review</span> →
+  <span class="status-pill s-green">completed</span> ⇄
+  <span class="status-pill s-blue">agent_learning</span>
+</p>
+<table>
+  <tr><th>จาก</th><th>ไป</th><th>เงื่อนไข</th></tr>
+  <tr><td>(สร้างใหม่)</td><td>not_started</td><td>สร้างจาก UI, MCP, sync หรือ API</td></tr>
+  <tr><td>not_started</td><td>triaging</td><td>auto-run เปิด + งานยังไม่มี agent_id</td></tr>
+  <tr><td>triaging</td><td>not_started</td><td>triage เสร็จ (agent_id ถูกกำหนดแล้ว)</td></tr>
+  <tr><td>not_started</td><td>agent_working</td><td>auto-run หยิบไปทำ หรือสั่งรันเอง</td></tr>
+  <tr><td>agent_working</td><td>ready_for_review</td><td>agent ทำเสร็จ (session idle)</td></tr>
+  <tr><td>ready_for_review</td><td>completed</td><td>ผู้ใช้กด "Complete Task"</td></tr>
+  <tr><td>completed</td><td>agent_learning</td><td>ผู้ใช้ส่ง feedback (ดาว + คอมเมนต์)</td></tr>
+  <tr><td>agent_learning</td><td>completed</td><td>สกัด skill เสร็จ</td></tr>
+</table>
+<h3>Auto-Run (ปุ่ม Play ที่ sidebar)</h3>
+<ul>
+  <li>Scheduler (<code>use-agent-auto-start.ts</code>) หา task ที่พร้อม: <code>not_started</code> + มี agent_id + ไม่ถูก snooze</li>
+  <li>จัดกลุ่มตาม agent เรียงตาม priority (critical &gt; high &gt; medium &gt; low)</li>
+  <li>แต่ละ agent รันพร้อมกันได้ตาม <code>max_parallel_sessions</code> (default 1) ที่เหลือเข้าคิว</li>
+  <li>เช็คซ้ำทุก 60 วินาทีกันงานค้าง</li>
+</ul>
+<div class="card django"><div class="label">🐍 เทียบ Django</div>
+<p style="margin:0">นี่คือ Celery worker + task queue ฉบับย่อส่วนที่รันใน process เดียว</p></div>
+
+<!-- ============ 7 ============ -->
+<h2 id="agents">7. ระบบ AI Agent Orchestration (หัวใจของโปรเจค)</h2>
+<p>ไฟล์หลัก: <code>src/main/agent-manager.ts</code> (ใหญ่ที่สุดในโปรเจค ~188KB)</p>
+
+<h3>Adapter Pattern : รองรับ AI 3 ค่าย</h3>
+<pre><code>CodingAgentAdapter (interface กลาง: coding-agent-adapter.ts)
+├── claude-code-adapter.ts  → Claude Code (@anthropic-ai/claude-agent-sdk)
+├── opencode-adapter.ts     → OpenCode (@opencode-ai/sdk, spawn server แยก)
+└── acp-adapter.ts          → Codex ของ OpenAI (@zed-industries/codex-acp)
+
+methods: createSession() / resumeSession() / streamSession()
+         abortSession() / approve() / stop()</code></pre>
+<div class="card django"><div class="label">🐍 เทียบ Django</div>
+<p style="margin:0">เหมือน abstract class <code>PaymentGateway</code> ที่มี <code>StripeGateway</code>,
+<code>OmiseGateway</code> สลับกันได้โดย business logic ไม่ต้องรู้ว่าคุยกับเจ้าไหน</p></div>
+
+<h3>Session Lifecycle 6 ขั้น</h3>
+<div class="flow">
+  <div class="flow-step"><div class="num">1</div><div class="body"><strong>START</strong><span>เตรียม git worktree → เขียนไฟล์ skills ลง workspace → สร้าง session ผ่าน adapter → ส่ง prompt</span></div></div>
+  <div class="flow-step"><div class="num">2</div><div class="body"><strong>STREAMING</strong><span>Polling Coordinator กลาง poll ทุก 2 วิ → dedup → ส่งให้ UI ผ่าน IPC <code>agent:output</code> (มี watchdog abort session ที่ค้างเกิน 5 นาที)</span></div></div>
+  <div class="flow-step"><div class="num">3</div><div class="body"><strong>HITL</strong><span>agent ขอ approve สิ่งเสี่ยง → UI แสดง banner → Approve/Reject (+ ข้อความ) → ส่งกลับให้ agent</span></div></div>
+  <div class="flow-step"><div class="num">4</div><div class="body"><strong>COMPLETE</strong><span>agent idle ครบ grace period → status เป็น ready_for_review → แจ้ง UI</span></div></div>
+  <div class="flow-step"><div class="num">5</div><div class="body"><strong>LEARNING</strong><span>ผู้ใช้ให้ดาว + คอมเมนต์ → ส่งเข้า session เดิม → agent ปรับ SKILL.md → sync เข้า DB</span></div></div>
+  <div class="flow-step"><div class="num">6</div><div class="body"><strong>ABORT/STOP</strong><span>ผู้ใช้สั่งหยุดเมื่อไหร่ก็ได้ → cleanup session</span></div></div>
+</div>
+
+<div class="card usecase">
+  <div class="label">💡 Use Case: ทำไมต้องมี "Polling Coordinator กลาง"?</div>
+  <p><strong>ปัญหา:</strong> ถ้ามี 10 sessions แล้วแต่ละตัวตั้ง <code>setInterval</code> เอง จะมี timer 10 ตัว
+  ยิง DB writes พร้อมกันจน event loop ของ Node.js สำลัก (UI ค้าง)</p>
+  <p style="margin:0"><strong>ทางแก้:</strong> timer <strong>ตัวเดียว</strong> วนทุก 2 วินาที ไล่ poll ทุก session ตามลำดับ
+  พร้อม cap ขนาด dedup structures ที่ 5,000 รายการกัน memory บวม
+  (เทียบ Django: เหมือนรวม cron ยิบย่อยเป็น Celery Beat ตัวเดียวที่ dispatch อย่างมีระเบียบ)</p>
+</div>
+
+<!-- ============ 8 ============ -->
+<h2 id="triage">8. Triage Agent : ระบบคัดแยกงานอัตโนมัติ</h2>
+<p>เมื่องานใหม่เข้ามาโดย<strong>ยังไม่รู้ว่า agent ตัวไหนควรทำ</strong> ระบบจะส่ง AI คัดแยกไปวิเคราะห์ก่อน:</p>
+<pre><code>งานใหม่ (ไม่มี agent_id) → status: 'triaging' → default agent ตื่นขึ้นมา
+   → find_similar_tasks  (ค้นงานเก่าที่คล้ายกันด้วย SQL LIKE)
+   → list_agents / list_skills / list_repos
+   → update_task(agent_id, skill_ids, repos, priority, labels) ครั้งเดียว
+→ status กลับเป็น 'not_started' (มี agent_id แล้ว) → auto-run หยิบไปรันจริง</code></pre>
+
+<div class="card usecase">
+  <div class="label">💡 Use Case จริง</div>
+  <p>ทีมคุณมี agent 2 ตัว: <strong>"Backend Agent"</strong> (ถนัด Django/API) กับ <strong>"Frontend Agent"</strong> (ถนัด React)
+  มี ticket ใหม่จาก Linear: <em>"แก้ bug: API /orders ตอบ 500 เมื่อส่ง date format ผิด"</em></p>
+  <p style="margin:0">Triage agent ค้นงานเก่าด้วยคีย์เวิร์ด "API", "500", "orders" พบว่างานแบบนี้ Backend Agent
+  เคยทำสำเร็จ 5 ครั้ง จึงมอบหมาย Backend Agent + แนบ skill "django-error-handling" +
+  repo "company/backend-api" + ตั้ง priority เป็น high แล้วถอยออกไปให้ auto-run ทำงานต่อ</p>
+</div>
+
+<h3>Safety Guards</h3>
+<ul>
+  <li>API <code>/update_task</code> <strong>บล็อกการเปลี่ยน status</strong> ระหว่างอยู่สถานะ triaging (กัน agent มือลั่น)</li>
+  <li>Retry สูงสุด 2 ครั้ง ถ้ายังหา agent ไม่ได้จะ toast ให้มนุษย์เลือกเอง</li>
+  <li>มีปุ่ม "Triage" (ไอคอนประกาย ✨) ให้กดสั่งเองในหน้า task detail</li>
+</ul>
+
+<!-- ============ 9 ============ -->
+<h2 id="skills">9. ระบบ Skills และ Auto-Learning</h2>
+<p><strong>Skill</strong> = คลังความรู้/คำสั่งสำเร็จรูปที่ agent โหลดไปใช้ตอนทำงาน เก็บเป็น Markdown:</p>
+<pre><code>---
+name: django-migration-safety
+description: แนวทางเขียน migration อย่างปลอดภัยใน production
+---
+
+## ขั้นตอน
+1. ห้าม drop column ทันที ให้ deprecate ก่อน
+2. ...</code></pre>
+<ul>
+  <li>ตอนเริ่ม session ระบบเขียน skills เป็นไฟล์: <code>workspaces/&lt;taskId&gt;/.agents/skills/&lt;name&gt;/SKILL.md</code></li>
+  <li>ลำดับการเลือก: ระดับ task &gt; ระดับ agent &gt; ไม่กำหนด (โหลดทั้งหมด)</li>
+  <li>แต่ละ skill มี <code>version</code> (เพิ่มอัตโนมัติ), <code>confidence</code> (0-1), ตัวนับ <code>uses</code></li>
+</ul>
+
+<h3>Auto-Learning Loop (ฟีเจอร์เด็ดสุด)</h3>
+<pre><code>งานเสร็จ → ให้ดาว 1-5 + คอมเมนต์
+   → learnFromSession() ส่ง feedback เข้า session เดิม (status: agent_learning)
+   → agent ทบทวนงานตัวเอง แก้/สร้าง SKILL.md ใน workspace
+   → syncSkillsFromWorkspace() สแกนกลับเข้า DB (version +1, ปรับ confidence)</code></pre>
+
+<div class="card usecase">
+  <div class="label">💡 Use Case จริง</div>
+  <p>Agent ทำงาน "เพิ่ม endpoint ใหม่" แล้ว<strong>ลืมเขียน test</strong> คุณให้ 3 ดาวพร้อมคอมเมนต์
+  "โค้ดโอเค แต่ลืม unit test ทุกครั้งเลย"</p>
+  <p style="margin:0">ระบบส่ง feedback เข้า session เดิม agent อัปเดต skill "api-development"
+  เพิ่มหัวข้อ "ต้องเขียน unit test ครอบ endpoint ใหม่เสมอ" → จากนี้ agent ทุกตัวที่โหลด skill นี้
+  จะไม่ลืม test อีก <strong>ระบบฉลาดขึ้นเองจาก feedback ของเรา</strong></p>
+</div>
+
+<!-- ============ 10 ============ -->
+<h2 id="worktree">10. Git Worktree Management</h2>
+<p><strong>ปัญหา:</strong> agent 3 ตัวทำ 3 tasks ใน repo เดียวกันพร้อมกัน ถ้าใช้ clone เดียวกัน = แก้ไฟล์ชนกันพินาศ</p>
+<p><strong>ทางแก้</strong> (<code>src/main/worktree-manager.ts</code>):</p>
+<pre><code>~/&lt;userData&gt;/
+├── repos/                    ← bare clone (โหลดครั้งเดียว แชร์ git objects)
+│   └── &lt;org&gt;/&lt;repo&gt;.git
+└── workspaces/               ← worktree แยกต่อ task
+    ├── &lt;taskId-1&gt;/&lt;repo&gt;/   ← branch: task/&lt;taskId-1&gt;
+    └── &lt;taskId-2&gt;/&lt;repo&gt;/   ← branch: task/&lt;taskId-2&gt;</code></pre>
+<ul>
+  <li>clone ด้วย <code>gh repo clone --bare</code> (GitHub) หรือ <code>glab repo clone --bare</code> (GitLab)</li>
+  <li>แต่ละ task ได้ branch + โฟลเดอร์ของตัวเอง ประหยัด disk เพราะแชร์ git objects</li>
+  <li>จบงานแล้ว <code>git worktree remove --force</code> เก็บกวาดสะอาด</li>
+</ul>
+<div class="card django"><div class="label">🐍 เทียบ Django</div>
+<p style="margin:0">เหมือนแต่ละ test case ได้ database transaction แยกของตัวเอง ทำอะไรก็ไม่กระทบคนอื่น</p></div>
+
+<!-- ============ 11 ============ -->
+<h2 id="integrations">11. Integrations กับเครื่องมือภายนอก</h2>
+<p>ทุก integration เป็น <strong>plugin</strong> ใน <code>src/main/plugins/</code> (มี <code>registry.ts</code> เป็นตัวกลาง)</p>
+<table>
+  <tr><th>Integration</th><th>Auth</th><th>Sync</th><th>หมายเหตุ</th></tr>
+  <tr><td><strong>Linear</strong></td><td>OAuth</td><td>GraphQL, polling</td><td>ดึง issues, อัปเดต status, โพสต์ comment</td></tr>
+  <tr><td><strong>HubSpot</strong></td><td>OAuth</td><td>REST</td><td>sync CRM tickets/deals</td></tr>
+  <tr><td><strong>Notion</strong></td><td>OAuth</td><td>REST v1</td><td>sync database pages + properties ครบ + attachments</td></tr>
+  <tr><td><strong>YouTrack</strong></td><td>OAuth (custom)</td><td>REST</td><td>รองรับ custom fields</td></tr>
+  <tr><td><strong>GitHub Issues</strong></td><td>gh CLI</td><td>REST v3</td><td>ดึง issues จาก repos</td></tr>
+  <tr><td><strong>GitLab</strong></td><td>glab CLI</td><td>REST</td><td>repo discovery (task sync กำลังพัฒนา)</td></tr>
+  <tr><td><strong>Peakflo Workflo</strong></td><td>Supabase JWT</td><td>REST</td><td>sync 2 ทาง ทั้ง tasks + skills (enterprise)</td></tr>
+</table>
+<p><strong>Pattern กลาง:</strong> <code>listTasks()</code> ดึงงาน → สร้าง local task พร้อม <code>external_id</code> →
+polling ทุกประมาณ 60 วิ → เมื่อ status ในแอปเปลี่ยน ยิง update กลับต้นทาง
+OAuth tokens เก็บเข้ารหัสในตาราง <code>oauth_tokens</code></p>
+
+<!-- ============ 12 ============ -->
+<h2 id="ipc">12. IPC Architecture : Frontend คุยกับ Backend ยังไง</h2>
+<p>ส่วนที่ backend dev ควรเข้าใจที่สุด เพราะมันคือ <strong>"REST API ภายในแอป"</strong></p>
+
+<div class="grid2">
+  <div class="card">
+    <h4 style="margin-top:0">แบบที่ 1: Request-Response (เหมือน REST)</h4>
+    <pre style="margin-bottom:0"><code>React component
+→ window.electronAPI.db.getTasks()
+→ ipcRenderer.invoke('db:getTasks')
+→ ipcMain.handle('db:getTasks')
+   ทำงานกับ SQLite
+→ return Promise กลับ React</code></pre>
+  </div>
+  <div class="card">
+    <h4 style="margin-top:0">แบบที่ 2: Event Streaming (เหมือน WebSocket)</h4>
+    <pre style="margin-bottom:0"><code>// main ยิงฝั่งเดียว:
+webContents.send('agent:output', data)
+
+// renderer subscribe:
+ipcRenderer.on('agent:output', cb)
+
+ใช้กับ output ของ agent แบบ real-time</code></pre>
+  </div>
+</div>
+<p>ตั้งชื่อ channel แบบ <code>namespace:action</code> เช่น <code>db:getTasks</code>, <code>agentSession:start</code>,
+<code>worktree:setup</code>, <code>terminal:spawn</code></p>
+
+<h3>HTTP Servers ภายใน 3 ตัว (จุดที่น่าสนใจมาก)</h3>
+<table>
+  <tr><th>Server</th><th>มีไว้ทำไม</th></tr>
+  <tr><td><code>task-api-server.ts</code></td><td>ให้ <strong>AI agent เรียกกลับเข้ามา</strong> (ผ่าน env <code>TASK_API_URL</code>)
+    เช่น <code>/update_task</code>, <code>/find_similar_tasks</code> เพราะ agent เป็น subprocess แยก ใช้ IPC ไม่ได้ ต้องใช้ HTTP</td></tr>
+  <tr><td><code>mobile-api-server.ts</code></td><td>ให้มือถือ/เบราว์เซอร์เชื่อมเข้ามาดูงาน + WebSocket แจ้ง update real-time</td></tr>
+  <tr><td><code>secret-broker.ts</code></td><td>แจก secrets ให้ agent ผ่าน per-session token (agent ไม่เห็น API key ตรงๆ)</td></tr>
+</table>
+
+<!-- ============ 13 ============ -->
+<h2 id="heartbeat">13. Heartbeat Monitoring</h2>
+<p>หลัง agent ทำเสร็จ (เช่นเปิด PR แล้ว) งาน "ยังไม่จบจริง" เพราะต้องรอ CI, รอ review
+Heartbeat (<code>heartbeat-scheduler.ts</code>) คือระบบตามเช็คความคืบหน้าอัตโนมัติ:</p>
+<ol>
+  <li>Agent เขียน <code>heartbeat.md</code> (checklist สิ่งที่ต้องตามเช็ค) ไว้ใน workspace</li>
+  <li>เปิด heartbeat บน task → scheduler ตื่นทุก 60 วิ หา task ที่ถึงเวลาเช็ค</li>
+  <li>spawn agent session เบาๆ ไปทำตาม checklist เช่น CI เขียวไหม? มี comment ใหม่ใน PR ไหม?</li>
+  <li>บันทึกผลลง <code>heartbeat_logs</code> + แจ้งเตือนเมื่อต้องการความสนใจ</li>
+</ol>
+<div class="card usecase">
+  <div class="label">💡 Use Case จริง</div>
+  <p style="margin:0">Agent เปิด PR #123 ไว้ตอนเช้า คุณเปิด heartbeat แล้วไปทำอย่างอื่น
+  บ่ายสอง CI ล้ม heartbeat ตรวจเจอแล้วส่ง notification เด้งบนเครื่อง:
+  <em>"PR #123 ของ task X มี CI failure"</em> คุณกดเข้าไปสั่ง agent แก้ต่อได้ทันที ไม่ต้องนั่งเฝ้า GitHub</p>
+</div>
+
+<!-- ============ 14 ============ -->
+<h2 id="misc">14. ส่วนประกอบอื่นๆ ที่น่าสนใจ</h2>
+<table>
+  <tr><th>ฟีเจอร์</th><th>รายละเอียด</th></tr>
+  <tr><td><strong>Infinite Canvas</strong></td><td>พื้นที่ทำงาน 2D เลื่อน/ซูมได้ วาง panel ได้หลายชนิด: Task, Transcript (ดู agent สด),
+    <strong>Terminal จริง</strong> (xterm.js + node-pty), Browser มี minimap และเส้นเชื่อม panel</td></tr>
+  <tr><td><strong>Recurring Tasks</strong></td><td>งานซ้ำตาม cron expression (<code>recurrence-scheduler.ts</code>) template มี <code>is_recurring=true</code></td></tr>
+  <tr><td><strong>Task Snoozing</strong></td><td>เลื่อนงานด้วย <code>snoozed_until</code> หายจาก auto-run แล้วเด้งกลับเองเมื่อถึงเวลา</td></tr>
+  <tr><td><strong>Subtasks</strong></td><td>แตกงานย่อย (<code>parent_task_id</code>) ลากจัดลำดับได้ (dnd-kit)</td></tr>
+  <tr><td><strong>MCP Management</strong></td><td>เพิ่ม MCP servers เอง (local/remote) + Orchestrator panel ไว้ทดสอบยิง tool</td></tr>
+  <tr><td><strong>Plugin Marketplace</strong></td><td>ติดตั้ง Claude Code plugins จาก GitHub ดึง skills/MCP จาก bundle มาใช้ได้</td></tr>
+  <tr><td><strong>Enterprise (Supabase)</strong></td><td>ตอบคำถาม "ทำไมมี Supabase ทั้งที่ local-first?" : ใช้แค่ login องค์กรเพื่อ sync
+    skills/MCP กับ Workflo <strong>ข้อมูลงานอยู่ใน SQLite ในเครื่อง 100%</strong></td></tr>
+  <tr><td><strong>Mobile Build</strong></td><td><code>src/mobile/</code> + <code>vite.mobile.config.ts</code> ดูงานจากมือถือในวง LAN ผ่าน mobile-api-server</td></tr>
+  <tr><td><strong>Remotion</strong></td><td>render ภาพ preview UI เป็น PNG (ใช้ทำ docs/marketing)</td></tr>
+  <tr><td><strong>Auto Updater</strong></td><td>เช็คเวอร์ชันใหม่จาก GitHub Releases ตอนเปิดแอป</td></tr>
+  <tr><td><strong>WINDOWS_PORT_LOG.md</strong></td><td>บันทึกบทเรียน port จาก macOS ไป Windows 13+ ประเด็น (EPIPE, ASAR unpack, NSIS ฯลฯ)</td></tr>
+</table>
+
+<!-- ============ 15 ============ -->
+<h2 id="setup">15. วิธีติดตั้งและรันโปรเจค</h2>
+<div class="card warn">
+  <div class="label">⚠️ ต้องมีก่อน</div>
+  <p style="margin:0">Node.js (LTS) + <strong>pnpm 9</strong> (โปรเจคบังคับ pnpm ห้าม npm!) + Git
+  และแนะนำ <code>gh</code> CLI (GitHub) / <code>glab</code> CLI (GitLab) สำหรับฟีเจอร์ worktree</p>
+</div>
+<pre><code># 1. ติดตั้ง dependencies (rebuild native modules อัตโนมัติผ่าน postinstall)
+pnpm install
+
+# 2. รันโหมดพัฒนา (hot reload)
+pnpm dev
+
+# 3. รัน tests / ตรวจ type / lint
+pnpm test:run
+pnpm typecheck
+pnpm lint
+
+# 4. Build แจกจ่าย
+pnpm build:mac      # macOS (dmg + zip)
+pnpm build:win      # Windows (NSIS)
+pnpm build:linux    # Linux (AppImage)
+
+# โหมด mobile web (แยกต่างหาก, port 5174)
+pnpm dev:mobile</code></pre>
+<p><strong>หมายเหตุ:</strong> <code>better-sqlite3</code> และ <code>node-pty</code> เป็น native modules (C++)
+ต้อง compile ให้ตรงกับ Electron ถ้า build พังให้ดู <code>scripts/rebuild-native.mjs</code></p>
+<h3>การใช้งานครั้งแรก</h3>
+<ol>
+  <li>เปิดแอป เจอ <strong>Onboarding Wizard</strong> ตรวจ CLI tools (git, gh, node, agent CLIs) ติดตั้งให้ถ้าขาด</li>
+  <li>ไป <strong>Settings</strong> ตั้งค่า agent (เลือกค่าย AI + API key หรือ auth)</li>
+  <li>เชื่อม integrations ผ่าน OAuth (Linear, Notion ฯลฯ)</li>
+  <li>สร้าง/sync tasks แล้วกดปุ่ม Play (auto-run) หรือสั่งรันทีละงาน</li>
+</ol>
+
+<!-- ============ 16 ============ -->
+<h2 id="e2e">16. Use Case แบบ End-to-End (ภาพเต็มหนึ่งรอบ)</h2>
+<div class="flow">
+  <div class="flow-step"><div class="num">1</div><div class="body"><strong>PM สร้าง issue ใน Linear</strong><span>"เพิ่ม rate limiting ให้ API /login"</span></div></div>
+  <div class="flow-step"><div class="num">2</div><div class="body"><strong>20x ดึงเข้ามาเป็น task</strong><span>linear-plugin polling ทุก ~60 วิ (status: not_started, ยังไม่มี agent_id)</span></div></div>
+  <div class="flow-step"><div class="num">3</div><div class="body"><strong>Triage Agent วิเคราะห์</strong><span>ค้นงานเก่า → มอบหมาย "Backend Agent" + skill "api-security" + repo "company/auth-service" + priority: high</span></div></div>
+  <div class="flow-step"><div class="num">4</div><div class="body"><strong>Agent เริ่มงาน</strong><span>worktree-manager สร้าง branch task/&lt;id&gt; → Claude Code ทำงาน เราดู transcript สด (status: agent_working)</span></div></div>
+  <div class="flow-step"><div class="num">5</div><div class="body"><strong>HITL</strong><span>agent จะรัน "pip install slowapi" → banner เด้งถาม → เรากด Approve</span></div></div>
+  <div class="flow-step"><div class="num">6</div><div class="body"><strong>เสร็จ + เปิด PR</strong><span>status: ready_for_review</span></div></div>
+  <div class="flow-step"><div class="num">7</div><div class="body"><strong>Heartbeat ตามเช็ค</strong><span>CI ผ่าน, reviewer คอมเมนต์ → agent แก้ตาม</span></div></div>
+  <div class="flow-step"><div class="num">8</div><div class="body"><strong>Review + Complete</strong><span>ให้ 4 ดาว + "ดี แต่ rate limit ควร config ผ่าน env ได้" (status: completed)</span></div></div>
+  <div class="flow-step"><div class="num">9</div><div class="body"><strong>Agent เรียนรู้</strong><span>อัปเดต skill "api-security" เพิ่มข้อ "rate limit values ต้องอ่านจาก env เสมอ" (version +1)</span></div></div>
+  <div class="flow-step"><div class="num">10</div><div class="body"><strong>ปิดงานครบวงจร</strong><span>สถานะ sync กลับไปปิด issue ใน Linear อัตโนมัติ ครั้งหน้างานแบบนี้ agent ทำได้ดีขึ้นตั้งแต่ครั้งแรก</span></div></div>
+</div>
+
+<!-- ============ 17 ============ -->
+<h2 id="reading">17. เส้นทางการอ่านโค้ดสำหรับมือใหม่ (เรียงตามลำดับ)</h2>
+<ol>
+  <li><code>README.md</code> : ภาพรวม features</li>
+  <li><code>docs/task-lifecycle.md</code> : state machine ของงาน <strong>(สำคัญสุด)</strong></li>
+  <li><code>src/shared/constants.ts</code> : enum + ค่าคงที่ (ไฟล์เล็ก อ่านง่าย)</li>
+  <li><code>src/main/database.ts</code> : อ่านเฉพาะ <code>createTables()</code> จะเข้าใจ data model ทั้งแอป</li>
+  <li><code>src/main/ipc-handlers.ts</code> : เหมือนอ่าน urls.py รู้ว่าแอปทำอะไรได้บ้าง</li>
+  <li><code>src/preload/index.ts</code> : UI เรียกอะไรได้บ้าง</li>
+  <li><code>src/main/adapters/coding-agent-adapter.ts</code> : interface กลางของ agent</li>
+  <li><code>src/main/agent-manager.ts</code> : หัวใจของระบบ (ใหญ่มาก ค่อยๆ อ่านทีละ flow)</li>
+  <li><code>src/renderer/src/stores/</code> : state ฝั่ง UI</li>
+  <li><code>docs/</code> ที่เหลือ : เจาะเรื่องที่สนใจ (skills.md, taskSources.md, enterprise-sync...)</li>
+</ol>
+
+<footer>
+  📄 เอกสารนี้สร้างจากการสแกนโค้ดจริง ณ version 0.0.104 (มิถุนายน 2026)<br>
+  ไฟล์คู่กัน: <code>PROJECT_GUIDE_TH.md</code> (เวอร์ชัน Markdown สำหรับอ่านใน editor)
+</footer>
+
+</main>
+</div>
+</body>
+</html>
